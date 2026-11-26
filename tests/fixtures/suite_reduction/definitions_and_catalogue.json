@@ -1,0 +1,2394 @@
+{
+  "slice": "definitions_and_catalogue",
+  "base_commit": "9f2769017ebc3525317dee008b4944834e307331",
+  "seconds_source": "Comparable local JUnit sums unavailable. The base timing attempt completed its tests after an xdist worker terminated and the working-tree guard failed the session during authoring.",
+  "modules": [
+    {
+      "module": "tests/test_error_catalogue_can.py",
+      "tests_before": 317,
+      "tests_after": 96,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_error_catalogue_com.py",
+      "tests_before": 134,
+      "tests_after": 68,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_error_catalogue_ec1_debug.py",
+      "tests_before": 349,
+      "tests_after": 132,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_error_catalogue_ec2_artifacts_reports.py",
+      "tests_before": 163,
+      "tests_after": 78,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_error_catalogue_ec3_run_coordination.py",
+      "tests_before": 150,
+      "tests_after": 78,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_error_catalogue_whole.py",
+      "tests_before": 88,
+      "tests_after": 48,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_mcp_result_text.py",
+      "tests_before": 367,
+      "tests_after": 32,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_can.py",
+      "tests_before": 55,
+      "tests_after": 36,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_debug_sessions.py",
+      "tests_before": 38,
+      "tests_after": 38,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_debug_symbol_info.py",
+      "tests_before": 129,
+      "tests_after": 37,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_score.py",
+      "tests_before": 350,
+      "tests_after": 150,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_score_model.py",
+      "tests_before": 1,
+      "tests_after": 1,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_td1_run_control.py",
+      "tests_before": 148,
+      "tests_after": 60,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_td2_debug_data_target.py",
+      "tests_before": 337,
+      "tests_after": 120,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_td3_flash_artifacts_reports.py",
+      "tests_before": 187,
+      "tests_after": 126,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_td4_can_io_listings.py",
+      "tests_before": 117,
+      "tests_after": 54,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_td5_runs_lease.py",
+      "tests_before": 169,
+      "tests_after": 52,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_td6_config_recovery_upgrade.py",
+      "tests_before": 352,
+      "tests_after": 91,
+      "seconds_before": null,
+      "seconds_after": null
+    },
+    {
+      "module": "tests/test_tool_definition_uart.py",
+      "tests_before": 109,
+      "tests_after": 85,
+      "seconds_before": null,
+      "seconds_after": null
+    }
+  ],
+  "clusters": [
+    {
+      "id": "the_entry_resolves_at_its_reference_uri@error_catalogue_can",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_can.py::test_the_entry_resolves_at_its_reference_uri"
+      ],
+      "cases_before": 57,
+      "cases_after": 1,
+      "reason": "Read the same required resource keys and compare the served entries in one table.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_can.py::test_the_entry_resolves_at_its_reference_uri"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"bridge_process_reap_failed\": ErrorRemedy(",
+          "replace": "\"bridge_process_reap_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_can.py::test_the_entry_resolves_at_its_reference_uri[bridge_process_reap_failed]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_the_entry_resolves_at_its_reference_uri"
+        }
+      ]
+    },
+    {
+      "id": "remediation_fields_hand_a_refusal_the_entry@error_catalogue_can",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_can.py::test_remediation_fields_hand_a_refusal_the_entry"
+      ],
+      "cases_before": 57,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_can.py::test_remediation_fields_hand_a_refusal_the_entry"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"bridge_process_reap_failed\": ErrorRemedy(",
+          "replace": "\"bridge_process_reap_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_can.py::test_remediation_fields_hand_a_refusal_the_entry[bridge_process_reap_failed]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_remediation_fields_hand_a_refusal_the_entry"
+        }
+      ]
+    },
+    {
+      "id": "every_new_entry_says_what_its_refusal_means@error_catalogue_can",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means"
+      ],
+      "cases_before": 37,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"bridge_process_reap_failed\": ErrorRemedy(",
+          "replace": "\"bridge_process_reap_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means[bridge_process_reap_failed]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means"
+        }
+      ]
+    },
+    {
+      "id": "advice_that_fits_any_refusal_fits_none@error_catalogue_can",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_can.py::test_advice_that_fits_any_refusal_fits_none"
+      ],
+      "cases_before": 37,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_can.py::test_advice_that_fits_any_refusal_fits_none"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_can.py",
+          "find": "    text a caller is served.\"\"\"\n    required = CONTENT[error_type]\n",
+          "replace": "    text a caller is served.\"\"\"\n    return []\n    required = CONTENT[error_type]\n",
+          "caught_before": "tests/test_error_catalogue_can.py::test_advice_that_fits_any_refusal_fits_none[bridge_process_reap_failed]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_advice_that_fits_any_refusal_fits_none"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "Read `backend_error` inside `cleanup_error`:",
+          "replace": "Ignore the bridge's reported error:",
+          "caught_before": "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means[bridge_process_reap_failed]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means"
+        }
+      ]
+    },
+    {
+      "id": "every_new_step_names_something_the_code_has@error_catalogue_can",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_can.py::test_every_new_step_names_something_the_code_has"
+      ],
+      "cases_before": 37,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_can.py::test_every_new_step_names_something_the_code_has"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"bridge_process_reap_failed\": ErrorRemedy(",
+          "replace": "\"bridge_process_reap_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_can.py::test_every_new_step_names_something_the_code_has[bridge_process_reap_failed]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_every_new_step_names_something_the_code_has"
+        }
+      ]
+    },
+    {
+      "id": "an_entry_that_makes_the_forbidden_claim_fails_on_that_claim_alone@error_catalogue_can",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_can.py::test_an_entry_that_makes_the_forbidden_claim_fails_on_that_claim_alone"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_can.py::test_an_entry_that_makes_the_forbidden_claim_fails_on_that_claim_alone"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_can.py",
+          "find": "    text a caller is served.\"\"\"\n    required = CONTENT[error_type]\n",
+          "replace": "    text a caller is served.\"\"\"\n    return []\n    required = CONTENT[error_type]\n",
+          "caught_before": "tests/test_error_catalogue_can.py::test_an_entry_that_makes_the_forbidden_claim_fails_on_that_claim_alone[can_adapter_close_failed-valid0-Call `can_session_stop` again after a bridge close fails: the retry closes the session and releases the bus.]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_an_entry_that_makes_the_forbidden_claim_fails_on_that_claim_alone"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "Read `backend_error` inside `cleanup_error`:",
+          "replace": "Ignore the bridge's reported error:",
+          "caught_before": "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means[bridge_process_reap_failed]",
+          "caught_after": "tests/test_error_catalogue_can.py::test_every_new_entry_says_what_its_refusal_means"
+        }
+      ]
+    },
+    {
+      "id": "every_com_error_type_has_a_catalogue_entry@error_catalogue_com",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_com.py::test_every_com_error_type_has_a_catalogue_entry"
+      ],
+      "cases_before": 24,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_com.py::test_every_com_error_type_has_a_catalogue_entry"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"audit_write_failed\": ErrorRemedy(",
+          "replace": "\"audit_write_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_com.py::test_every_com_error_type_has_a_catalogue_entry[audit_write_failed]",
+          "caught_after": "tests/test_error_catalogue_com.py::test_every_com_error_type_has_a_catalogue_entry"
+        }
+      ]
+    },
+    {
+      "id": "the_reference_resolves_every_com_error_type@error_catalogue_com",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_com.py::test_the_reference_resolves_every_com_error_type"
+      ],
+      "cases_before": 24,
+      "cases_after": 1,
+      "reason": "Read the same required resource keys and compare the served entries in one table.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_com.py::test_the_reference_resolves_every_com_error_type"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"audit_write_failed\": ErrorRemedy(",
+          "replace": "\"audit_write_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_com.py::test_the_reference_resolves_every_com_error_type[audit_write_failed]",
+          "caught_after": "tests/test_error_catalogue_com.py::test_the_reference_resolves_every_com_error_type"
+        }
+      ]
+    },
+    {
+      "id": "a_new_entry_says_what_the_code_does@error_catalogue_com",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_com.py::test_a_new_entry_says_what_the_code_does"
+      ],
+      "cases_before": 15,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_com.py::test_a_new_entry_says_what_the_code_does"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"audit_write_failed\": ErrorRemedy(",
+          "replace": "\"audit_write_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_com.py::test_a_new_entry_says_what_the_code_does[audit_write_failed]",
+          "caught_after": "tests/test_error_catalogue_com.py::test_a_new_entry_says_what_the_code_does"
+        }
+      ]
+    },
+    {
+      "id": "a_new_entry_orders_its_steps_the_way_the_state_needs@error_catalogue_com",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_com.py::test_a_new_entry_orders_its_steps_the_way_the_state_needs"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_com.py::test_a_new_entry_orders_its_steps_the_way_the_state_needs"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"audit_write_failed\": ErrorRemedy(",
+          "replace": "\"audit_write_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_com.py::test_a_new_entry_orders_its_steps_the_way_the_state_needs[audit_write_failed]",
+          "caught_after": "tests/test_error_catalogue_com.py::test_a_new_entry_orders_its_steps_the_way_the_state_needs"
+        }
+      ]
+    },
+    {
+      "id": "a_refusal_the_bare_key_cannot_answer_has_its_own@error_catalogue_ec1_debug",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec1_debug.py::test_a_refusal_the_bare_key_cannot_answer_has_its_own"
+      ],
+      "cases_before": 22,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec1_debug.py::test_a_refusal_the_bare_key_cannot_answer_has_its_own"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"com_port_not_configured:esptool\": ErrorRemedy(",
+          "replace": "\"com_port_not_configured:esptool_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_a_refusal_the_bare_key_cannot_answer_has_its_own[com_port_not_configured:esptool]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_a_refusal_the_bare_key_cannot_answer_has_its_own"
+        }
+      ]
+    },
+    {
+      "id": "the_reference_resolves_every_debug_refusal@error_catalogue_ec1_debug",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_reference_resolves_every_debug_refusal"
+      ],
+      "cases_before": 127,
+      "cases_after": 1,
+      "reason": "Read the same required resource keys and compare the served entries in one table.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_reference_resolves_every_debug_refusal"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"adapter_not_found:openocd\": ErrorRemedy(",
+          "replace": "\"adapter_not_found:openocd_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_the_reference_resolves_every_debug_refusal[adapter_not_found-openocd]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_the_reference_resolves_every_debug_refusal"
+        }
+      ]
+    },
+    {
+      "id": "the_bare_entries_this_area_writes_resolve_at_their_own_uri@error_catalogue_ec1_debug",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_bare_entries_this_area_writes_resolve_at_their_own_uri"
+      ],
+      "cases_before": 13,
+      "cases_after": 1,
+      "reason": "Read the same required resource keys and compare the served entries in one table.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_bare_entries_this_area_writes_resolve_at_their_own_uri"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"cleanup_failed\": ErrorRemedy(",
+          "replace": "\"cleanup_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_the_bare_entries_this_area_writes_resolve_at_their_own_uri[cleanup_failed]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_the_bare_entries_this_area_writes_resolve_at_their_own_uri"
+        }
+      ]
+    },
+    {
+      "id": "the_entry_says_what_its_producers_make_true@error_catalogue_ec1_debug",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_entry_says_what_its_producers_make_true"
+      ],
+      "cases_before": 44,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_entry_says_what_its_producers_make_true"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"audit_broken:openocd\": ErrorRemedy(",
+          "replace": "\"audit_broken:openocd_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_the_entry_says_what_its_producers_make_true[audit_broken:openocd]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_the_entry_says_what_its_producers_make_true"
+        }
+      ]
+    },
+    {
+      "id": "the_settle_detector_reads_each_clause_on_its_own@error_catalogue_ec1_debug",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_settle_detector_reads_each_clause_on_its_own"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec1_debug.py::test_the_settle_detector_reads_each_clause_on_its_own"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_ec1_debug.py",
+          "find": "    \"\"\"Whether a step tells the reader, affirmatively, to call probe_target.\"\"\"\n    return any(\"probe_target\" in clause for clause in affirmative_clauses(step))\n",
+          "replace": "    \"\"\"Whether a step tells the reader, affirmatively, to call probe_target.\"\"\"\n    return True\n    return any(\"probe_target\" in clause for clause in affirmative_clauses(step))\n",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_the_settle_detector_reads_each_clause_on_its_own[Do not use probe_target. Retry debug_stop_session; it does not reset the target.-False-True]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_the_settle_detector_reads_each_clause_on_its_own"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "when the connection went away.\"\n        ),\n        remediation=(\n            \"Call probe_target.",
+          "replace": "when the connection went away.\"\n        ),\n        remediation=(\n            \"Do not call probe_target.",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_an_unsettled_stop_names_the_call_that_settles_it[halt_not_confirmed-openocd]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_an_unsettled_stop_names_the_call_that_settles_it"
+        }
+      ]
+    },
+    {
+      "id": "an_unsettled_stop_names_the_call_that_settles_it@error_catalogue_ec1_debug",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec1_debug.py::test_an_unsettled_stop_names_the_call_that_settles_it"
+      ],
+      "cases_before": 8,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec1_debug.py::test_an_unsettled_stop_names_the_call_that_settles_it"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "when the connection went away.\"\n        ),\n        remediation=(\n            \"Call probe_target.",
+          "replace": "when the connection went away.\"\n        ),\n        remediation=(\n            \"Do not call probe_target.",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_an_unsettled_stop_names_the_call_that_settles_it[halt_not_confirmed-openocd]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_an_unsettled_stop_names_the_call_that_settles_it"
+        }
+      ]
+    },
+    {
+      "id": "a_teardown_entry_counts_the_proofs_a_stop_takes@error_catalogue_ec1_debug",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec1_debug.py::test_a_teardown_entry_counts_the_proofs_a_stop_takes"
+      ],
+      "cases_before": 4,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec1_debug.py::test_a_teardown_entry_counts_the_proofs_a_stop_takes"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"cleanup_failed\": ErrorRemedy(",
+          "replace": "\"cleanup_failed_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec1_debug.py::test_a_teardown_entry_counts_the_proofs_a_stop_takes[cleanup_failed]",
+          "caught_after": "tests/test_error_catalogue_ec1_debug.py::test_a_teardown_entry_counts_the_proofs_a_stop_takes"
+        }
+      ]
+    },
+    {
+      "id": "each_new_entry_is_complete@error_catalogue_ec2_artifacts_reports",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_is_complete"
+      ],
+      "cases_before": 29,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_is_complete"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "f\"adapter_not_found:{DISCOVERY_SCOPE}\": ErrorRemedy(",
+          "replace": "f\"adapter_not_found:{DISCOVERY_SCOPE}_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_is_complete[adapter_not_found:discovery]",
+          "caught_after": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_is_complete"
+        }
+      ]
+    },
+    {
+      "id": "each_new_entry_says_what_its_refusal_means_and_what_to_do@error_catalogue_ec2_artifacts_reports",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_says_what_its_refusal_means_and_what_to_do"
+      ],
+      "cases_before": 29,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_says_what_its_refusal_means_and_what_to_do"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "f\"adapter_not_found:{DISCOVERY_SCOPE}\": ErrorRemedy(",
+          "replace": "f\"adapter_not_found:{DISCOVERY_SCOPE}_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_says_what_its_refusal_means_and_what_to_do[adapter_not_found:discovery]",
+          "caught_after": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_says_what_its_refusal_means_and_what_to_do"
+        }
+      ]
+    },
+    {
+      "id": "each_new_entry_resolves_as_a_reference_resource@error_catalogue_ec2_artifacts_reports",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_resolves_as_a_reference_resource"
+      ],
+      "cases_before": 29,
+      "cases_after": 1,
+      "reason": "Read the same required resource keys and compare the served entries in one table.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_resolves_as_a_reference_resource"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "f\"adapter_not_found:{DISCOVERY_SCOPE}\": ErrorRemedy(",
+          "replace": "f\"adapter_not_found:{DISCOVERY_SCOPE}_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_resolves_as_a_reference_resource[adapter_not_found:discovery]",
+          "caught_after": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_resolves_as_a_reference_resource"
+        }
+      ]
+    },
+    {
+      "id": "the_meaning_check_refuses_an_inverted_entry@error_catalogue_ec2_artifacts_reports",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_the_meaning_check_refuses_an_inverted_entry"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec2_artifacts_reports.py::test_the_meaning_check_refuses_an_inverted_entry"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_ec2_artifacts_reports.py",
+          "find": "def fact_problems(key: str, facts: Facts) -> list[str]:\n    entry = catalogue_entry(key)\n",
+          "replace": "def fact_problems(key: str, facts: Facts) -> list[str]:\n    return []\n    entry = catalogue_entry(key)\n",
+          "caught_before": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_the_meaning_check_refuses_an_inverted_entry[artifact_staging_failed-inverted0]",
+          "caught_after": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_the_meaning_check_refuses_an_inverted_entry"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"artifact_staging_failed\": ErrorRemedy(\n        meaning=(",
+          "replace": "\"artifact_staging_failed\": ErrorRemedy(\n        meaning=(\n            \"The bench is quarantined until an operator signs. \"",
+          "caught_before": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_says_what_its_refusal_means_and_what_to_do[artifact_staging_failed]",
+          "caught_after": "tests/test_error_catalogue_ec2_artifacts_reports.py::test_each_new_entry_says_what_its_refusal_means_and_what_to_do"
+        }
+      ]
+    },
+    {
+      "id": "each_entry_says_what_the_code_does@error_catalogue_ec3_run_coordination",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec3_run_coordination.py::test_each_entry_says_what_the_code_does"
+      ],
+      "cases_before": 37,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec3_run_coordination.py::test_each_entry_says_what_the_code_does"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"run_not_found\": ErrorRemedy(",
+          "replace": "\"run_not_found_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec3_run_coordination.py::test_each_entry_says_what_the_code_does[run_not_found]",
+          "caught_after": "tests/test_error_catalogue_ec3_run_coordination.py::test_each_entry_says_what_the_code_does"
+        }
+      ]
+    },
+    {
+      "id": "the_reference_resource_serves_each_entry@error_catalogue_ec3_run_coordination",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_ec3_run_coordination.py::test_the_reference_resource_serves_each_entry"
+      ],
+      "cases_before": 37,
+      "cases_after": 1,
+      "reason": "Read the same required resource keys and compare the served entries in one table.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_ec3_run_coordination.py::test_the_reference_resource_serves_each_entry"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"cleanup_failed:test_reactor\": ErrorRemedy(",
+          "replace": "\"cleanup_failed:test_reactor_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_error_catalogue_ec3_run_coordination.py::test_the_reference_resource_serves_each_entry[cleanup_failed:test_reactor]",
+          "caught_after": "tests/test_error_catalogue_ec3_run_coordination.py::test_the_reference_resource_serves_each_entry"
+        }
+      ]
+    },
+    {
+      "id": "an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails@error_catalogue_whole",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_whole.py::test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails"
+      ],
+      "cases_before": 12,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_whole.py::test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_whole.py",
+          "find": "    \"\"\"\n    check = dict(SUCCESS_CHECKS)[\"lease_state\"]\n",
+          "replace": "    \"\"\"\n    return []\n    check = dict(SUCCESS_CHECKS)[\"lease_state\"]\n",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails[meaning_does_not_pass_missing]",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "null one passes this check), `side_effect_status`",
+          "replace": "null one fails this check), `side_effect_status`",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_check_does",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_check_does"
+        }
+      ]
+    },
+    {
+      "id": "an_entry_that_lets_each_passing_lease_state_through_another_way_passes@error_catalogue_whole",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_whole.py::test_an_entry_that_lets_each_passing_lease_state_through_another_way_passes"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_whole.py::test_an_entry_that_lets_each_passing_lease_state_through_another_way_passes"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_whole.py",
+          "find": "    \"\"\"\n    check = dict(SUCCESS_CHECKS)[\"lease_state\"]\n",
+          "replace": "    \"\"\"\n    return [\"valid lease state rejected\"]\n    check = dict(SUCCESS_CHECKS)[\"lease_state\"]\n",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_an_entry_that_lets_each_passing_lease_state_through_another_way_passes[meaning_each_does_not_fail]",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_an_entry_that_lets_each_passing_lease_state_through_another_way_passes"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "null one passes this check), `side_effect_status`",
+          "replace": "null one fails this check), `side_effect_status`",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_check_does",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_check_does"
+        }
+      ]
+    },
+    {
+      "id": "a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails@error_catalogue_whole",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails"
+      ],
+      "cases_before": 19,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_whole.py",
+          "find": "    \"\"\"\n    shapes = refusal_shapes(\"mcp_command_untrusted\")\n",
+          "replace": "    \"\"\"\n    return []\n    shapes = refusal_shapes(\"mcp_command_untrusted\")\n",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails[adds_no_directory]",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "A refusal of one path carries `path`; an executable",
+          "replace": "A refusal of one path never carries `path`; an executable",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_the_mcp_command_untrusted_entry_names_the_fields_of_each_refusal_together",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_the_mcp_command_untrusted_entry_names_the_fields_of_each_refusal_together"
+        }
+      ]
+    },
+    {
+      "id": "a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes@error_catalogue_whole",
+      "action": "merged",
+      "nodes": [
+        "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Keep the same catalogue assertions and evaluate each original row from one test.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_error_catalogue_whole.py",
+          "find": "    \"\"\"\n    shapes = refusal_shapes(\"mcp_command_untrusted\")\n",
+          "replace": "    \"\"\"\n    return [\"valid refusal fields rejected\"]\n    shapes = refusal_shapes(\"mcp_command_untrusted\")\n",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes[file_refused_in_negations]",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes"
+        },
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "A refusal of one path carries `path`; an executable",
+          "replace": "A refusal of one path never carries `path`; an executable",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_the_mcp_command_untrusted_entry_names_the_fields_of_each_refusal_together",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_the_mcp_command_untrusted_entry_names_the_fields_of_each_refusal_together"
+        }
+      ]
+    },
+    {
+      "id": "every_catalogue_entry_is_named_by_the_advice_it_left_out@mcp_result_text",
+      "action": "merged",
+      "nodes": [
+        "tests/test_mcp_result_text.py::test_every_catalogue_entry_is_named_by_the_advice_it_left_out"
+      ],
+      "cases_before": 336,
+      "cases_after": 1,
+      "reason": "Check every catalogue key with its own MCP session and two responses in one test.",
+      "surviving_tests": [
+        "tests/test_mcp_result_text.py::test_every_catalogue_entry_is_named_by_the_advice_it_left_out"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/mcp.py",
+          "find": "return f\"{ERROR_URI_PREFIX}{key}\"",
+          "replace": "return f\"{ERROR_URI_PREFIX}{error_type}\"",
+          "caught_before": "tests/test_mcp_result_text.py::test_every_catalogue_entry_is_named_by_the_advice_it_left_out[target_not_detected:picotool]",
+          "caught_after": "tests/test_mcp_result_text.py::test_every_catalogue_entry_is_named_by_the_advice_it_left_out"
+        }
+      ]
+    },
+    {
+      "id": "each_relation_check_refuses_its_inverted_statement@tool_definition_can",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_can.py::test_each_relation_check_refuses_its_inverted_statement"
+      ],
+      "cases_before": 20,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_can.py::test_each_relation_check_refuses_its_inverted_statement"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_can.py",
+          "find": "    \"\"\"can.py:509-510 (start) and 699-700 (stop): a bus with `shares` refuses a call without one.\"\"\"\n    return stated(text, r\"`?shares`?\", r\"\\b(required|must)\\b\", unless=r\"\\b(not|never)\\s+(be\\s+)?required\\b|\\boptional\\b|\\bneed not\\b\")\n",
+          "replace": "    \"\"\"can.py:509-510 (start) and 699-700 (stop): a bus with `shares` refuses a call without one.\"\"\"\n    return False\n    return stated(text, r\"`?shares`?\", r\"\\b(required|must)\\b\", unless=r\"\\b(not|never)\\s+(be\\s+)?required\\b|\\boptional\\b|\\bneed not\\b\")\n",
+          "caught_before": "tests/test_tool_definition_can.py::test_each_relation_check_refuses_its_inverted_statement[participant_required_on_a_shared_bus-0]",
+          "caught_after": "tests/test_tool_definition_can.py::test_each_relation_check_refuses_its_inverted_statement"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Required on a bus with `shares`; any other name",
+          "replace": "Optional on any bus with `shares`; any other name",
+          "caught_before": "tests/test_tool_definition_can.py::test_participant_says_when_it_is_required_and_what_it_opens",
+          "caught_after": "tests/test_tool_definition_can.py::test_participant_says_when_it_is_required_and_what_it_opens"
+        }
+      ]
+    },
+    {
+      "id": "each_check_accepts_a_paraphrase_and_rejects_an_inversion@tool_definition_debug_symbol_info",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_debug_symbol_info.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion"
+      ],
+      "cases_before": 86,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_debug_symbol_info.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_debug_symbol_info.py",
+          "find": "    \"\"\"A C identifier, `::` qualification optional, and no expressions.\"\"\"\n    if not re.search(r\"\\bidentifier\", text, re.IGNORECASE):\n",
+          "replace": "    \"\"\"A C identifier, `::` qualification optional, and no expressions.\"\"\"\n    return False\n    if not re.search(r\"\\bidentifier\", text, re.IGNORECASE):\n",
+          "caught_before": "tests/test_tool_definition_debug_symbol_info.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion[names_symbol_syntax-C identifier, optionally ::-qualified, e.g. boot_counter.-True]",
+          "caught_after": "tests/test_tool_definition_debug_symbol_info.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": ").\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_s",
+          "replace": ").\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"Any text, including whitespace, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_s",
+          "caught_before": "tests/test_tool_definition_debug_symbol_info.py::test_the_symbol_description_names_the_syntax_the_schema_enforces",
+          "caught_after": "tests/test_tool_definition_debug_symbol_info.py::test_the_symbol_description_names_the_syntax_the_schema_enforces"
+        }
+      ]
+    },
+    {
+      "id": "the_refusal_check_wants_the_circumstance_beside_the_code@tool_definition_debug_symbol_info",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_debug_symbol_info.py::test_the_refusal_check_wants_the_circumstance_beside_the_code"
+      ],
+      "cases_before": 8,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_debug_symbol_info.py::test_the_refusal_check_wants_the_circumstance_beside_the_code"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_debug_symbol_info.py",
+          "find": "def explains(text: str, error_type: str) -> bool:\n    return any(\n",
+          "replace": "def explains(text: str, error_type: str) -> bool:\n    return False\n    return any(\n",
+          "caught_before": "tests/test_tool_definition_debug_symbol_info.py::test_the_refusal_check_wants_the_circumstance_beside_the_code[Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true, else permission_denied.-permission_denied-True]",
+          "caught_after": "tests/test_tool_definition_debug_symbol_info.py::test_the_refusal_check_wants_the_circumstance_beside_the_code"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": ").\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else permission_denied. Not in ELF: symbol_not_found.\"}}, required=[\"symbol\"])},",
+          "replace": ").\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else invalid_argument. Not in ELF: symbol_not_found.\"}}, required=[\"symbol\"])},",
+          "caught_before": "tests/test_tool_definition_debug_symbol_info.py::test_the_definition_explains_each_refusal_an_agent_acts_on[not-allowed]",
+          "caught_after": "tests/test_tool_definition_debug_symbol_info.py::test_the_definition_explains_each_refusal_an_agent_acts_on[not-allowed]"
+        }
+      ]
+    },
+    {
+      "id": "round1_is_half_up_on_the_exact_rational@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_round1_is_half_up_on_the_exact_rational"
+      ],
+      "cases_before": 10,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_round1_is_half_up_on_the_exact_rational"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "math.floor((20 * p + q) / (2 * q))",
+          "replace": "math.floor(10 * p / q)",
+          "caught_before": "tests/test_tool_definition_score.py::test_round1_is_half_up_on_the_exact_rational[the-worked-example]",
+          "caught_after": "tests/test_tool_definition_score.py::test_round1_is_half_up_on_the_exact_rational"
+        }
+      ]
+    },
+    {
+      "id": "tier_boundaries@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_tier_boundaries"
+      ],
+      "cases_before": 9,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_tier_boundaries"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "if score >= threshold:",
+          "replace": "if score > threshold:",
+          "caught_before": "tests/test_tool_definition_score.py::test_tier_boundaries[3.5-A]",
+          "caught_after": "tests/test_tool_definition_score.py::test_tier_boundaries"
+        }
+      ]
+    },
+    {
+      "id": "compute_tdqs@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_compute_tdqs"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_compute_tdqs"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "DIMENSION_WEIGHTS[dimension] * _exact(scores[dimension])",
+          "replace": "_exact(scores[dimension])",
+          "caught_before": "tests/test_tool_definition_score.py::test_compute_tdqs[the-worked-example-285-hundredths]",
+          "caught_after": "tests/test_tool_definition_score.py::test_compute_tdqs"
+        }
+      ]
+    },
+    {
+      "id": "coherence_is_the_half_up_mean_of_its_four_dimensions@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_coherence_is_the_half_up_mean_of_its_four_dimensions"
+      ],
+      "cases_before": 5,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_coherence_is_the_half_up_mean_of_its_four_dimensions"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "len(COHERENCE_DIMENSIONS))",
+          "replace": "len(COHERENCE_DIMENSIONS) + 1)",
+          "caught_before": "tests/test_tool_definition_score.py::test_coherence_is_the_half_up_mean_of_its_four_dimensions[values0-3.3]",
+          "caught_after": "tests/test_tool_definition_score.py::test_coherence_is_the_half_up_mean_of_its_four_dimensions"
+        }
+      ]
+    },
+    {
+      "id": "rollups_refuse_an_unscored_tool@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_rollups_refuse_an_unscored_tool"
+      ],
+      "cases_before": 3,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_rollups_refuse_an_unscored_tool"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "    \"\"\"The server-level scores. Every tool must be scored: the registry's 80 % allowance does not apply here.\"\"\"\n    if not names:\n",
+          "replace": "    \"\"\"The server-level scores. Every tool must be scored: the registry's 80 % allowance does not apply here.\"\"\"\n    return {}\n    if not names:\n",
+          "caught_before": "tests/test_tool_definition_score.py::test_rollups_refuse_an_unscored_tool[2-of-3]",
+          "caught_after": "tests/test_tool_definition_score.py::test_rollups_refuse_an_unscored_tool"
+        }
+      ]
+    },
+    {
+      "id": "schema_description_coverage@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_schema_description_coverage"
+      ],
+      "cases_before": 5,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_schema_description_coverage"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "coverage = 100 if total == 0",
+          "replace": "coverage = 0 if total == 0",
+          "caught_before": "tests/test_tool_definition_score.py::test_schema_description_coverage[0-0-100]",
+          "caught_after": "tests/test_tool_definition_score.py::test_schema_description_coverage"
+        }
+      ]
+    },
+    {
+      "id": "each_annotation_hint_is_read_on_its_own@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_each_annotation_hint_is_read_on_its_own"
+      ],
+      "cases_before": 16,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_each_annotation_hint_is_read_on_its_own"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "hints.get(hint) if isinstance(hints.get(hint), bool) else None",
+          "replace": "None",
+          "caught_before": "tests/test_tool_definition_score.py::test_each_annotation_hint_is_read_on_its_own[true-destructiveHint]",
+          "caught_after": "tests/test_tool_definition_score.py::test_each_annotation_hint_is_read_on_its_own"
+        }
+      ]
+    },
+    {
+      "id": "has_output_schema@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_has_output_schema"
+      ],
+      "cases_before": 3,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_has_output_schema"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "\"hasOutputSchema\": isinstance(output_schema, dict) and bool(output_schema)",
+          "replace": "\"hasOutputSchema\": output_schema is not None",
+          "caught_before": "tests/test_tool_definition_score.py::test_has_output_schema[output_schema1-False]",
+          "caught_after": "tests/test_tool_definition_score.py::test_has_output_schema"
+        }
+      ]
+    },
+    {
+      "id": "title_is_meaningful_when_it_exists_differs_and_is_longer@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_title_is_meaningful_when_it_exists_differs_and_is_longer"
+      ],
+      "cases_before": 4,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_title_is_meaningful_when_it_exists_differs_and_is_longer"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "\"titleIsMeaningful\": isinstance(title, str) and title != name and len(title) > len(name)",
+          "replace": "\"titleIsMeaningful\": bool(name)",
+          "caught_before": "tests/test_tool_definition_score.py::test_title_is_meaningful_when_it_exists_differs_and_is_longer[None-False]",
+          "caught_after": "tests/test_tool_definition_score.py::test_title_is_meaningful_when_it_exists_differs_and_is_longer"
+        }
+      ]
+    },
+    {
+      "id": "invocation_cost@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_invocation_cost"
+      ],
+      "cases_before": 20,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_invocation_cost"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "count + 2 * max(0, depth - 1) + 2 * unions",
+          "replace": "2 * count + 2 * max(0, depth - 1) + 2 * unions",
+          "caught_before": "tests/test_tool_definition_score.py::test_invocation_cost[four-required-scalars-cost-4]",
+          "caught_after": "tests/test_tool_definition_score.py::test_invocation_cost"
+        }
+      ]
+    },
+    {
+      "id": "an_absent_empty_or_property_less_schema_costs_nothing@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_an_absent_empty_or_property_less_schema_costs_nothing"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_an_absent_empty_or_property_less_schema_costs_nothing"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "return 0, 0, 0, 0",
+          "replace": "return 1, 1, 0, 1",
+          "caught_before": "tests/test_tool_definition_score.py::test_an_absent_empty_or_property_less_schema_costs_nothing[absent]",
+          "caught_after": "tests/test_tool_definition_score.py::test_an_absent_empty_or_property_less_schema_costs_nothing"
+        }
+      ]
+    },
+    {
+      "id": "each_definition_field_moves_the_hash@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_each_definition_field_moves_the_hash"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_each_definition_field_moves_the_hash"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "DEFINITION_FIELDS = (\"name\", \"title\",",
+          "replace": "DEFINITION_FIELDS = (\"title\",",
+          "caught_before": "tests/test_tool_definition_score.py::test_each_definition_field_moves_the_hash[name-read_other_thing]",
+          "caught_after": "tests/test_tool_definition_score.py::test_each_definition_field_moves_the_hash"
+        }
+      ]
+    },
+    {
+      "id": "a_missing_description_is_scored_without_the_model@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_a_missing_description_is_scored_without_the_model"
+      ],
+      "cases_before": 4,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_a_missing_description_is_scored_without_the_model"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "def evaluate_tool(definition: dict, siblings: Sequence[str], scorer: Any) -> dict:\n    name = definition[\"name\"]\n",
+          "replace": "def evaluate_tool(definition: dict, siblings: Sequence[str], scorer: Any) -> dict:\n    return {}\n    name = definition[\"name\"]\n",
+          "caught_before": "tests/test_tool_definition_score.py::test_a_missing_description_is_scored_without_the_model[absent]",
+          "caught_after": "tests/test_tool_definition_score.py::test_a_missing_description_is_scored_without_the_model"
+        }
+      ]
+    },
+    {
+      "id": "a_bad_tool_answer_is_refused@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_a_bad_tool_answer_is_refused"
+      ],
+      "cases_before": 16,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_a_bad_tool_answer_is_refused"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "def parse_tool_answer(text: str) -> dict:\n    answer = _decode(text)\n",
+          "replace": "def parse_tool_answer(text: str) -> dict:\n    return {}\n    answer = _decode(text)\n",
+          "caught_before": "tests/test_tool_definition_score.py::test_a_bad_tool_answer_is_refused[not-json]",
+          "caught_after": "tests/test_tool_definition_score.py::test_a_bad_tool_answer_is_refused"
+        }
+      ]
+    },
+    {
+      "id": "a_bad_coherence_answer_is_refused@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_a_bad_coherence_answer_is_refused"
+      ],
+      "cases_before": 46,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_a_bad_coherence_answer_is_refused"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "def parse_coherence_answer(text: str) -> dict:\n    answer = _decode(text)\n",
+          "replace": "def parse_coherence_answer(text: str) -> dict:\n    return {}\n    answer = _decode(text)\n",
+          "caught_before": "tests/test_tool_definition_score.py::test_a_bad_coherence_answer_is_refused[disambiguation-score-0]",
+          "caught_after": "tests/test_tool_definition_score.py::test_a_bad_coherence_answer_is_refused"
+        }
+      ]
+    },
+    {
+      "id": "is_shadow_candidate@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_is_shadow_candidate"
+      ],
+      "cases_before": 8,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_is_shadow_candidate"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "expensive - cheap >= 4",
+          "replace": "expensive - cheap > 4",
+          "caught_before": "tests/test_tool_definition_score.py::test_is_shadow_candidate[0-4-True]",
+          "caught_after": "tests/test_tool_definition_score.py::test_is_shadow_candidate"
+        }
+      ]
+    },
+    {
+      "id": "confirmation_procedure@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_confirmation_procedure"
+      ],
+      "cases_before": 8,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_confirmation_procedure"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "if _mean(head) < _mean(base):",
+          "replace": "if _mean(head) <= _mean(base):",
+          "caught_before": "tests/test_tool_definition_score.py::test_confirmation_procedure[a-tie-passes-on-one-pair]",
+          "caught_after": "tests/test_tool_definition_score.py::test_confirmation_procedure"
+        }
+      ]
+    },
+    {
+      "id": "the_mean_decides_not_the_overall@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_the_mean_decides_not_the_overall"
+      ],
+      "cases_before": 3,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_the_mean_decides_not_the_overall"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "if _mean(head) < _mean(base):",
+          "replace": "if True:",
+          "caught_before": "tests/test_tool_definition_score.py::test_the_mean_decides_not_the_overall[the-overall-falls-the-mean-holds-one-pair-passes]",
+          "caught_after": "tests/test_tool_definition_score.py::test_the_mean_decides_not_the_overall"
+        }
+      ]
+    },
+    {
+      "id": "noisy_scores_run_through_the_comparison@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_noisy_scores_run_through_the_comparison"
+      ],
+      "cases_before": 3,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_noisy_scores_run_through_the_comparison"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "pairs.extend(run_pair() for _ in range(CONFIRMATION[\"confirmation_pairs_on_drop\"]))",
+          "replace": "pairs.append(run_pair())",
+          "caught_before": "tests/test_tool_definition_score.py::test_noisy_scores_run_through_the_comparison[a-favourable-second-pair-then-a-blocking-median-and-an-unused-fourth]",
+          "caught_after": "tests/test_tool_definition_score.py::test_noisy_scores_run_through_the_comparison"
+        }
+      ]
+    },
+    {
+      "id": "a_scored_report_that_does_not_hold_together_is_rejected@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_a_scored_report_that_does_not_hold_together_is_rejected"
+      ],
+      "cases_before": 14,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_a_scored_report_that_does_not_hold_together_is_rejected"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "    \"\"\"Accept a saved report only for the current exports and versions, and only if it holds together.\"\"\"\n    digest = version_digest(record)\n",
+          "replace": "    \"\"\"Accept a saved report only for the current exports and versions, and only if it holds together.\"\"\"\n    return None\n    digest = version_digest(record)\n",
+          "caught_before": "tests/test_tool_definition_score.py::test_a_scored_report_that_does_not_hold_together_is_rejected[a-scored-tool-missing]",
+          "caught_after": "tests/test_tool_definition_score.py::test_a_scored_report_that_does_not_hold_together_is_rejected"
+        }
+      ]
+    },
+    {
+      "id": "the_version_digest_moves_with_every_field@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_the_version_digest_moves_with_every_field"
+      ],
+      "cases_before": 12,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_the_version_digest_moves_with_every_field"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "json.dumps(record, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False)",
+          "replace": "json.dumps({key: value for key, value in record.items() if key != \"model\"}, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False)",
+          "caught_before": "tests/test_tool_definition_score.py::test_the_version_digest_moves_with_every_field[model]",
+          "caught_after": "tests/test_tool_definition_score.py::test_the_version_digest_moves_with_every_field"
+        }
+      ]
+    },
+    {
+      "id": "each_changed_prompt_is_refused_and_named@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_each_changed_prompt_is_refused_and_named"
+      ],
+      "cases_before": 4,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_each_changed_prompt_is_refused_and_named"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "if _prompt_digest(prompts[key]) != hashes[key]:",
+          "replace": "if False:",
+          "caught_before": "tests/test_tool_definition_score.py::test_each_changed_prompt_is_refused_and_named[coherence_system]",
+          "caught_after": "tests/test_tool_definition_score.py::test_each_changed_prompt_is_refused_and_named"
+        }
+      ]
+    },
+    {
+      "id": "a_missing_prompt_or_a_missing_hash_is_refused_and_named@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_a_missing_prompt_or_a_missing_hash_is_refused_and_named"
+      ],
+      "cases_before": 4,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_a_missing_prompt_or_a_missing_hash_is_refused_and_named"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "def verify_prompts(prompts: dict[str, str], hashes: dict[str, str]) -> None:\n    for key in PROMPT_KEYS:\n",
+          "replace": "def verify_prompts(prompts: dict[str, str], hashes: dict[str, str]) -> None:\n    return None\n    for key in PROMPT_KEYS:\n",
+          "caught_before": "tests/test_tool_definition_score.py::test_a_missing_prompt_or_a_missing_hash_is_refused_and_named[coherence_system]",
+          "caught_after": "tests/test_tool_definition_score.py::test_a_missing_prompt_or_a_missing_hash_is_refused_and_named"
+        }
+      ]
+    },
+    {
+      "id": "the_tool_prompt_falls_back_where_a_field_is_missing@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_the_tool_prompt_falls_back_where_a_field_is_missing"
+      ],
+      "cases_before": 3,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_the_tool_prompt_falls_back_where_a_field_is_missing"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "\"title\": title if isinstance(title, str) else None,",
+          "replace": "\"title\": title if isinstance(title, str) else \"Unknown\",",
+          "caught_before": "tests/test_tool_definition_score.py::test_the_tool_prompt_falls_back_where_a_field_is_missing[absent]",
+          "caught_after": "tests/test_tool_definition_score.py::test_the_tool_prompt_falls_back_where_a_field_is_missing"
+        }
+      ]
+    },
+    {
+      "id": "a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused@tool_definition_score",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_score.py::test_a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original score cases together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_score.py::test_a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused"
+      ],
+      "defects": [
+        {
+          "file": "tools/tool_definition_score.py",
+          "find": "    \"\"\"The Appendix A user message for one tool: the full definition and the sibling names.\"\"\"\n    signals = context_signals(definition)\n",
+          "replace": "    \"\"\"The Appendix A user message for one tool: the full definition and the sibling names.\"\"\"\n    return template\n    signals = context_signals(definition)\n",
+          "caught_before": "tests/test_tool_definition_score.py::test_a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused[invocationCost]",
+          "caught_after": "tests/test_tool_definition_score.py::test_a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused"
+        }
+      ]
+    },
+    {
+      "id": "each_meaning_check_accepts_the_claim_and_refuses_its_inversion@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_meaning_check_accepts_the_claim_and_refuses_its_inversion"
+      ],
+      "cases_before": 45,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_meaning_check_accepts_the_claim_and_refuses_its_inversion"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_td1_run_control.py",
+          "find": "    named here, and a change to that support edits those two.\"\"\"\n    if any(names_a_server(name, description) for name in SESSION_NAMES):\n",
+          "replace": "    named here, and a change to that support edits those two.\"\"\"\n    return False\n    if any(names_a_server(name, description) for name in SESSION_NAMES):\n",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_each_meaning_check_accepts_the_claim_and_refuses_its_inversion[needs_the_session_gdb_server]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_each_meaning_check_accepts_the_claim_and_refuses_its_inversion"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "on a GDB server",
+          "replace": "on any debugger",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on[debug_halt]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on"
+        }
+      ]
+    },
+    {
+      "id": "each_tool_is_listed_with_every_input_property_described@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_tool_is_listed_with_every_input_property_described"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_tool_is_listed_with_every_input_property_described"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Seconds each for the interrupt and stop. The default and ceiling is 10, or the debugger's timeout_s if lower; under 0.1 counts as 0.1 first. Expiry answers timeout. A stopped core gets no interrupt.",
+          "replace": "",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_each_tool_is_listed_with_every_input_property_described[debug_halt]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_each_tool_is_listed_with_every_input_property_described"
+        }
+      ]
+    },
+    {
+      "id": "each_definition_keeps_to_the_length_limits@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_definition_keeps_to_the_length_limits"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_definition_keeps_to_the_length_limits"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Halts the core;",
+          "replace": "Halts the core. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. Check the core state before every debugging call. ",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_each_definition_keeps_to_the_length_limits[debug_halt]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_each_definition_keeps_to_the_length_limits"
+        }
+      ]
+    },
+    {
+      "id": "backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "on a GDB server",
+          "replace": "on any debugger",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on[debug_halt]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on"
+        }
+      ]
+    },
+    {
+      "id": "each_description_names_the_session_it_works_in_and_the_one_debugger_it_binds@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_description_names_the_session_it_works_in_and_the_one_debugger_it_binds"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_each_description_names_the_session_it_works_in_and_the_one_debugger_it_binds"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "exactly one debugger configured,",
+          "replace": "any number of debuggers configured,",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_each_description_names_the_session_it_works_in_and_the_one_debugger_it_binds[debug_halt]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_each_description_names_the_session_it_works_in_and_the_one_debugger_it_binds"
+        }
+      ]
+    },
+    {
+      "id": "the_tools_that_need_a_session_say_what_they_answer_without_one@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_tools_that_need_a_session_say_what_they_answer_without_one"
+      ],
+      "cases_before": 5,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_tools_that_need_a_session_say_what_they_answer_without_one"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": " (else session_not_active) o",
+          "replace": " (else invalid_argument) o",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_the_tools_that_need_a_session_say_what_they_answer_without_one[debug_halt]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_the_tools_that_need_a_session_say_what_they_answer_without_one"
+        }
+      ]
+    },
+    {
+      "id": "the_two_reads_say_they_answer_ok_and_inactive_without_a_session@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_two_reads_say_they_answer_ok_and_inactive_without_a_session"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_two_reads_say_they_answer_ok_and_inactive_without_a_session"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "No session: ok, active false,",
+          "replace": "No session: ok false, active true,",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_the_two_reads_say_they_answer_ok_and_inactive_without_a_session[debug_get_session_status]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_the_two_reads_say_they_answer_ok_and_inactive_without_a_session"
+        }
+      ]
+    },
+    {
+      "id": "the_reads_say_they_never_move_the_core@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_reads_say_they_never_move_the_core"
+      ],
+      "cases_before": 3,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_reads_say_they_never_move_the_core"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "never halts or resumes the core;",
+          "replace": "halts and resumes the core;",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_the_reads_say_they_never_move_the_core[debug_get_session_status]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_the_reads_say_they_never_move_the_core"
+        }
+      ]
+    },
+    {
+      "id": "status_and_stop_reason_say_they_record_an_arrived_stop_and_answer_an_abnormal_one@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_status_and_stop_reason_say_they_record_an_arrived_stop_and_answer_an_abnormal_one"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_status_and_stop_reason_say_they_record_an_arrived_stop_and_answer_an_abnormal_one"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Records new stops",
+          "replace": "Ignores new stops",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_status_and_stop_reason_say_they_record_an_arrived_stop_and_answer_an_abnormal_one[debug_get_session_status]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_status_and_stop_reason_say_they_record_an_arrived_stop_and_answer_an_abnormal_one"
+        }
+      ]
+    },
+    {
+      "id": "every_stop_reason_a_definition_lists_is_one_the_code_produces@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_every_stop_reason_a_definition_lists_is_one_the_code_produces"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_every_stop_reason_a_definition_lists_is_one_the_code_produces"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "breakpoint_hit, halted, exception",
+          "replace": "breakpoint_hit, halted, fault",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_every_stop_reason_a_definition_lists_is_one_the_code_produces[debug_get_stop_reason]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_every_stop_reason_a_definition_lists_is_one_the_code_produces"
+        }
+      ]
+    },
+    {
+      "id": "every_identifier_a_definition_names_exists@tool_definition_td1_run_control",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_every_identifier_a_definition_names_exists"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_every_identifier_a_definition_names_exists"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Returns stop_reason halted",
+          "replace": "Returns debug_halt_state_underproved halted",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_every_identifier_a_definition_names_exists[debug_halt]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_every_identifier_a_definition_names_exists"
+        }
+      ]
+    },
+    {
+      "id": "each_check_accepts_a_paraphrase_and_rejects_an_inversion@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion"
+      ],
+      "cases_before": 153,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_td2_debug_data_target.py",
+          "find": "def reads_target_memory(text: str) -> bool:\n    first = first_sentence(text)\n",
+          "replace": "def reads_target_memory(text: str) -> bool:\n    return False\n    first = first_sentence(text)\n",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion[reads_target_memory-Read an allowed symbol's bytes from target memory.-True]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_check_accepts_a_paraphrase_and_rejects_an_inversion"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Reads a symbol from target memory",
+          "replace": "Reads a symbol from an offline file",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_it_reads_target_memory[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_it_reads_target_memory"
+        }
+      ]
+    },
+    {
+      "id": "the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction"
+      ],
+      "cases_before": 37,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_td2_debug_data_target.py",
+          "find": "    \"\"\"\n    code = rf\"(?<![\\w.]){re.escape(error_type)}(?![\\w])\"\n",
+          "replace": "    \"\"\"\n    return False\n    code = rf\"(?<![\\w.]){re.escape(error_type)}(?![\\w])\"\n",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction[Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true, else permission_denied.-permission_denied-allowed_symbols|allow_all_symbols|\\\\bnot\\\\s+(?:allowed|listed)\\\\b-absent-True]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "d.\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else permission_denied. Not in ELF: symbol_not_found.\"}}, required=[\"symbol\"])},",
+          "replace": "d.\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else invalid_argument. Not in ELF: symbol_not_found.\"}}, required=[\"symbol\"])},",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_symbol_policy_and_its_refusals[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_symbol_policy_and_its_refusals"
+        }
+      ]
+    },
+    {
+      "id": "every_input_property_carries_its_own_description@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_every_input_property_carries_its_own_description"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_every_input_property_carries_its_own_description"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Default 'run' (core executes); 'halt' stops the core at reset; 'init' also runs the reset-init script (clocks, wait states, watchdog), OpenOCD-only, else not_supported.",
+          "replace": "",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_every_input_property_carries_its_own_description[reset_target]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_every_input_property_carries_its_own_description"
+        }
+      ]
+    },
+    {
+      "id": "each_description_fits_the_listing_budget@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_description_fits_the_listing_budget"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_description_fits_the_listing_budget"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Check the debugger backend is installed:",
+          "replace": "Check the debugger backend. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. The debugger backend is installed on this host. ",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_description_fits_the_listing_budget[debugger_info]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_description_fits_the_listing_budget"
+        }
+      ]
+    },
+    {
+      "id": "every_identifier_a_definition_names_exists@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_every_identifier_a_definition_names_exists"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_every_identifier_a_definition_names_exists"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Returns backend, executable",
+          "replace": "Returns debugger_info_synthetic_field, executable",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_every_identifier_a_definition_names_exists[debugger_info]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_every_identifier_a_definition_names_exists"
+        }
+      ]
+    },
+    {
+      "id": "the_definitions_name_the_probe_and_the_board_the_project_way@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_the_definitions_name_the_probe_and_the_board_the_project_way"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_the_definitions_name_the_probe_and_the_board_the_project_way"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "contacts no probe or board",
+          "replace": "contacts no ST-Link or Nucleo",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_the_definitions_name_the_probe_and_the_board_the_project_way[debugger_info]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_the_definitions_name_the_probe_and_the_board_the_project_way"
+        }
+      ]
+    },
+    {
+      "id": "the_tools_that_run_on_every_backend_are_not_described_as_tied_to_one@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_the_tools_that_run_on_every_backend_are_not_described_as_tied_to_one"
+      ],
+      "cases_before": 4,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_the_tools_that_run_on_every_backend_are_not_described_as_tied_to_one"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Check the debugger backend is installed",
+          "replace": "OpenOCD only. Check the debugger backend is installed",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_the_tools_that_run_on_every_backend_are_not_described_as_tied_to_one[debugger_info]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_the_tools_that_run_on_every_backend_are_not_described_as_tied_to_one"
+        }
+      ]
+    },
+    {
+      "id": "each_read_says_it_reads_target_memory@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_it_reads_target_memory"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_it_reads_target_memory"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Reads a symbol from target memory",
+          "replace": "Reads a symbol from an offline file",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_it_reads_target_memory[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_it_reads_target_memory"
+        }
+      ]
+    },
+    {
+      "id": "each_symbol_description_names_the_syntax_and_gives_only_valid_examples@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_symbol_description_names_the_syntax_and_gives_only_valid_examples"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_symbol_description_names_the_syntax_and_gives_only_valid_examples"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": " max_dump_size_bytes: permission_denied.\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else p",
+          "replace": " max_dump_size_bytes: permission_denied.\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"A free-form path, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else p",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_symbol_description_names_the_syntax_and_gives_only_valid_examples[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_symbol_description_names_the_syntax_and_gives_only_valid_examples"
+        }
+      ]
+    },
+    {
+      "id": "each_read_states_the_symbol_policy_and_its_refusals@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_symbol_policy_and_its_refusals"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_symbol_policy_and_its_refusals"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "d.\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else permission_denied. Not in ELF: symbol_not_found.\"}}, required=[\"symbol\"])},",
+          "replace": "d.\", \"inputSchema\": object_schema({\"symbol\": {**SYMBOL_NAME, \"description\": \"C identifier, optionally ::-qualified, e.g. boot_counter. Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true (default false), else invalid_argument. Not in ELF: symbol_not_found.\"}}, required=[\"symbol\"])},",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_symbol_policy_and_its_refusals[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_symbol_policy_and_its_refusals"
+        }
+      ]
+    },
+    {
+      "id": "each_read_ties_each_prerequisite_to_its_backend_in_one_sentence@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_ties_each_prerequisite_to_its_backend_in_one_sentence"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_ties_each_prerequisite_to_its_backend_in_one_sentence"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "s. OpenOCD needs debug_start_session (e",
+          "replace": "s. OpenOCD never needs debug_start_session (e",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_ties_each_prerequisite_to_its_backend_in_one_sentence[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_ties_each_prerequisite_to_its_backend_in_one_sentence"
+        }
+      ]
+    },
+    {
+      "id": "each_read_says_an_open_session_answers_on_every_backend@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_an_open_session_answers_on_every_backend"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_an_open_session_answers_on_every_backend"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": " use an open session, else f",
+          "replace": " ignore an open session, use f",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_an_open_session_answers_on_every_backend[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_says_an_open_session_answers_on_every_backend"
+        }
+      ]
+    },
+    {
+      "id": "each_read_states_the_size_cap@tool_definition_td2_debug_data_target",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_size_cap"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_size_cap"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Over max_dump_size_bytes",
+          "replace": "Any size, regardless of max_dump_size_bytes",
+          "caught_before": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_size_cap[debug_symbol_value]",
+          "caught_after": "tests/test_tool_definition_td2_debug_data_target.py::test_each_read_states_the_size_cap"
+        }
+      ]
+    },
+    {
+      "id": "each_relation_accepts_its_paraphrases_and_rejects_their_inversions@tool_definition_td3_flash_artifacts_reports",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions"
+      ],
+      "cases_before": 31,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_td3_flash_artifacts_reports.py",
+          "find": "    clause; never \"needs no `key`\", and never `refusal` for `key` granted.\"\"\"\n    named = rf\"(?:[\\w<>]+\\.)*{key}\\b\"\n",
+          "replace": "    clause; never \"needs no `key`\", and never `refusal` for `key` granted.\"\"\"\n    return False\n    named = rf\"(?:[\\w<>]+\\.)*{key}\\b\"\n",
+          "caught_before": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions[needs_with_refusal]",
+          "caught_after": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Needs allow_flash, else permission_denied",
+          "replace": "Never needs allow_flash or answers permission_denied",
+          "caught_before": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_flash_firmware_names_allow_flash_and_its_refusal",
+          "caught_after": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_flash_firmware_names_allow_flash_and_its_refusal"
+        }
+      ]
+    },
+    {
+      "id": "each_check_refuses_the_listed_definition_with_its_meaning_flipped@tool_definition_td3_flash_artifacts_reports",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_check_refuses_the_listed_definition_with_its_meaning_flipped"
+      ],
+      "cases_before": 32,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_check_refuses_the_listed_definition_with_its_meaning_flipped"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Default false: not reset.",
+          "replace": "Default true: reset.",
+          "caught_before": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_check_refuses_the_listed_definition_with_its_meaning_flipped[true-false:reset-default]",
+          "caught_after": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_check_refuses_the_listed_definition_with_its_meaning_flipped"
+        },
+        {
+          "file": "tests/test_tool_definition_td3_flash_artifacts_reports.py",
+          "find": "return default and unreset and not claims(text, DEFAULT_TRUE) and not true_denies_reset(text)",
+          "replace": "return default or claims(text, DEFAULT_TRUE)",
+          "caught_before": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_check_refuses_the_listed_definition_with_its_meaning_flipped[true-false:reset-default]",
+          "caught_after": "tests/test_tool_definition_td3_flash_artifacts_reports.py::test_each_check_refuses_the_listed_definition_with_its_meaning_flipped"
+        }
+      ]
+    },
+    {
+      "id": "each_relation_check_refuses_its_inverted_statement@tool_definition_td4_can_io_listings",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td4_can_io_listings.py::test_each_relation_check_refuses_its_inverted_statement"
+      ],
+      "cases_before": 64,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td4_can_io_listings.py::test_each_relation_check_refuses_its_inverted_statement"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_td4_can_io_listings.py",
+          "find": "    \"\"\"can.py:730-731: without the bus `allow_write` the send is `permission_denied`.\"\"\"\n    return stated(text, field(\"allow_write\"), field(\"permission_denied\"), unless=r\"\\b(not needed|never)\\b\")\n",
+          "replace": "    \"\"\"can.py:730-731: without the bus `allow_write` the send is `permission_denied`.\"\"\"\n    return False\n    return stated(text, field(\"allow_write\"), field(\"permission_denied\"), unless=r\"\\b(not needed|never)\\b\")\n",
+          "caught_before": "tests/test_tool_definition_td4_can_io_listings.py::test_each_relation_check_refuses_its_inverted_statement[write_permission_gates_the_send-0]",
+          "caught_after": "tests/test_tool_definition_td4_can_io_listings.py::test_each_relation_check_refuses_its_inverted_statement"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Needs the bus `allow_write`, else `permission_denied`",
+          "replace": "Never needs the bus `allow_write` or answers `permission_denied`",
+          "caught_before": "tests/test_tool_definition_td4_can_io_listings.py::test_can_send_says_what_it_needs_before_it_transmits",
+          "caught_after": "tests/test_tool_definition_td4_can_io_listings.py::test_can_send_says_what_it_needs_before_it_transmits"
+        }
+      ]
+    },
+    {
+      "id": "each_relation_check_refuses_its_inverted_statement@tool_definition_td5_runs_lease",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_each_relation_check_refuses_its_inverted_statement"
+      ],
+      "cases_before": 72,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_each_relation_check_refuses_its_inverted_statement"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_td5_runs_lease.py",
+          "find": "    comes first (coordination.py:894).\"\"\"\n    return stated(\n",
+          "replace": "    comes first (coordination.py:894).\"\"\"\n    return False\n    return stated(\n",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_each_relation_check_refuses_its_inverted_statement[run_held_until_stop_or_exit-0]",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_each_relation_check_refuses_its_inverted_statement"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "holding the devices a sequence like flash, reset, read needs until bench_run_stop or",
+          "replace": "holding the devices a sequence like flash, reset, read needs only until",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_bench_run_start_says_how_long_a_run_holds_and_what_it_may_touch",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_bench_run_start_says_how_long_a_run_holds_and_what_it_may_touch"
+        }
+      ]
+    },
+    {
+      "id": "every_input_at_any_depth_carries_its_own_description_within_the_limits@tool_definition_td5_runs_lease",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_every_input_at_any_depth_carries_its_own_description_within_the_limits"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_every_input_at_any_depth_carries_its_own_description_within_the_limits"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "The config entry's name, else `unknown_device`.",
+          "replace": "The config entry's name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. It is the config entry name. ",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_every_input_at_any_depth_carries_its_own_description_within_the_limits[bench_run_start]",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_every_input_at_any_depth_carries_its_own_description_within_the_limits"
+        }
+      ]
+    },
+    {
+      "id": "describing_an_input_leaves_what_a_call_may_pass_unchanged@tool_definition_td5_runs_lease",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_describing_an_input_leaves_what_a_call_may_pass_unchanged"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_describing_an_input_leaves_what_a_call_may_pass_unchanged"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "\"required\": [\"kind\"],",
+          "replace": "\"required\": [\"kind\", \"id\"],",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_describing_an_input_leaves_what_a_call_may_pass_unchanged[bench_run_start]",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_describing_an_input_leaves_what_a_call_may_pass_unchanged"
+        }
+      ]
+    },
+    {
+      "id": "the_annotations_stay_and_the_text_does_not_contradict_them@tool_definition_td5_runs_lease",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_the_annotations_stay_and_the_text_does_not_contradict_them"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_the_annotations_stay_and_the_text_does_not_contradict_them"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Declare a run holding the devices",
+          "replace": "Read-only. Declare a run holding the devices",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_the_annotations_stay_and_the_text_does_not_contradict_them[bench_run_start]",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_the_annotations_stay_and_the_text_does_not_contradict_them"
+        }
+      ]
+    },
+    {
+      "id": "no_definition_speaks_in_command_line_flags@tool_definition_td5_runs_lease",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_no_definition_speaks_in_command_line_flags"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_no_definition_speaks_in_command_line_flags"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Declare a run holding the devices",
+          "replace": "Pass --devices to declare a run holding the devices",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_no_definition_speaks_in_command_line_flags[bench_run_start]",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_no_definition_speaks_in_command_line_flags"
+        }
+      ]
+    },
+    {
+      "id": "every_refusal_a_tool_answers_is_named_in_its_definition@tool_definition_td5_runs_lease",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_every_refusal_a_tool_answers_is_named_in_its_definition"
+      ],
+      "cases_before": 22,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_every_refusal_a_tool_answers_is_named_in_its_definition"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "The config entry's name, else `unknown_device`.",
+          "replace": "The configuration entry name.",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_every_refusal_a_tool_answers_is_named_in_its_definition[bench_run_start-unknown_device]",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_every_refusal_a_tool_answers_is_named_in_its_definition"
+        }
+      ]
+    },
+    {
+      "id": "run_says_what_a_handle_is_and_where_it_comes_from@tool_definition_td5_runs_lease",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_run_says_what_a_handle_is_and_where_it_comes_from"
+      ],
+      "cases_before": 2,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td5_runs_lease.py::test_run_says_what_a_handle_is_and_where_it_comes_from"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "                        \"A handle from test_reactor_run's `run`: `run-` and 16 hex digits, else `invalid_argument`; \"\n                        \"unknown: `run_not_found`. Leave it out to list this bench's runs: `runs`, `active_runs`.\"\n",
+          "replace": "                        \"A handle from the process table: `run-` and 16 hex digits, else `invalid_argument`; \"\n                        \"unknown: `run_not_found`. Leave it out to list this bench's runs: `runs`, `active_runs`.\"\n",
+          "caught_before": "tests/test_tool_definition_td5_runs_lease.py::test_run_says_what_a_handle_is_and_where_it_comes_from[test_reactor_status]",
+          "caught_after": "tests/test_tool_definition_td5_runs_lease.py::test_run_says_what_a_handle_is_and_where_it_comes_from"
+        }
+      ]
+    },
+    {
+      "id": "each_check_accepts_the_claim_and_rejects_its_inversion@tool_definition_td6_config_recovery_upgrade",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_each_check_accepts_the_claim_and_rejects_its_inversion"
+      ],
+      "cases_before": 251,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_each_check_accepts_the_claim_and_rejects_its_inversion"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_td6_config_recovery_upgrade.py",
+          "find": "    no segment that pairs the default with true.\"\"\"\n    stated = False\n",
+          "replace": "    no segment that pairs the default with true.\"\"\"\n    return False\n    stated = False\n",
+          "caught_before": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_each_check_accepts_the_claim_and_rejects_its_inversion[states_default_false-0]",
+          "caught_after": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_each_check_accepts_the_claim_and_rejects_its_inversion"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Default false writes nothing. true writes carried via project_config_set",
+          "replace": "Default true writes carried via project_config_set",
+          "caught_before": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_every_boolean_states_its_default_false",
+          "caught_after": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_every_boolean_states_its_default_false"
+        }
+      ]
+    },
+    {
+      "id": "every_input_property_is_the_expected_one_and_describes_itself@tool_definition_td6_config_recovery_upgrade",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_every_input_property_is_the_expected_one_and_describes_itself"
+      ],
+      "cases_before": 6,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_every_input_property_is_the_expected_one_and_describes_itself"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Default false writes nothing. true writes carried via project_config_set (allow_config_description_write, else permission_denied), then call project_config_reload_description; none: applied false.",
+          "replace": "",
+          "caught_before": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_every_input_property_is_the_expected_one_and_describes_itself[project_config_adopt_hardware]",
+          "caught_after": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_every_input_property_is_the_expected_one_and_describes_itself"
+        }
+      ]
+    },
+    {
+      "id": "the_catalogue_says_what_the_definitions_leave_to_it@tool_definition_td6_config_recovery_upgrade",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_the_catalogue_says_what_the_definitions_leave_to_it"
+      ],
+      "cases_before": 7,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_the_catalogue_says_what_the_definitions_leave_to_it"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/knowledge.py",
+          "find": "\"config_write_in_open_run\": ErrorRemedy(",
+          "replace": "\"config_write_in_open_run_renamed\": ErrorRemedy(",
+          "caught_before": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_the_catalogue_says_what_the_definitions_leave_to_it[config_write_in_open_run-meaning]",
+          "caught_after": "tests/test_tool_definition_td6_config_recovery_upgrade.py::test_the_catalogue_says_what_the_definitions_leave_to_it"
+        }
+      ]
+    },
+    {
+      "id": "each_com_read_relation_check_refuses_its_inverted_statement@tool_definition_uart",
+      "action": "merged",
+      "nodes": [
+        "tests/test_tool_definition_uart.py::test_each_com_read_relation_check_refuses_its_inverted_statement"
+      ],
+      "cases_before": 25,
+      "cases_after": 1,
+      "reason": "Run the original wording or definition rows together and report every mismatch.",
+      "surviving_tests": [
+        "tests/test_tool_definition_uart.py::test_each_com_read_relation_check_refuses_its_inverted_statement"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_tool_definition_uart.py",
+          "find": "    names its condition, so the two cannot trade places.\"\"\"\n    zero = ten = False\n",
+          "replace": "    names its condition, so the two cannot trade places.\"\"\"\n    return False\n    zero = ten = False\n",
+          "caught_before": "tests/test_tool_definition_uart.py::test_each_com_read_relation_check_refuses_its_inverted_statement[wait_defaults_follow_until-0]",
+          "caught_after": "tests/test_tool_definition_uart.py::test_each_com_read_relation_check_refuses_its_inverted_statement"
+        },
+        {
+          "file": "src/agentic_hil/contracts.py",
+          "find": "Without until the default is 0 and a wait ends at the first bytes to arrive; with until the default is 10 s.",
+          "replace": "Without until the default is 10 s; with until the default is 0.",
+          "caught_before": "tests/test_tool_definition_uart.py::test_wait_timeout_s_names_both_defaults_the_cap_and_its_unit",
+          "caught_after": "tests/test_tool_definition_uart.py::test_wait_timeout_s_names_both_defaults_the_cap_and_its_unit"
+        }
+      ]
+    },
+    {
+      "id": "the_scan_reads_every_module_and_the_pinned_number_of_types@error_catalogue_whole",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_error_catalogue_whole.py::test_the_scan_reads_every_module_and_the_pinned_number_of_types"
+      ],
+      "cases_before": 1,
+      "cases_after": 1,
+      "reason": "Reuse the ordinary package inventory across the loadgroup worker while preserving distinct scan inputs.",
+      "surviving_tests": [
+        "tests/test_error_catalogue_whole.py::test_the_scan_reads_every_module_and_the_pinned_number_of_types"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/cli.py",
+          "find": "    return {\"ok\": False, \"error_type\": \"unsupported_agent\", \"summary\": summary, \"agent\": normalize_agent(agent), \"allowed_agents\": supported_skill_agents(), **remediation_fields(\"unsupported_agent\")}",
+          "replace": "    return {\"ok\": False, \"error_type\": \"agent_command_unsupported\", \"summary\": summary, \"agent\": normalize_agent(agent), \"allowed_agents\": supported_skill_agents(), **remediation_fields(\"unsupported_agent\")}",
+          "caught_before": "tests/test_error_catalogue_whole.py::test_the_scan_reads_every_module_and_the_pinned_number_of_types",
+          "caught_after": "tests/test_error_catalogue_whole.py::test_the_scan_reads_every_module_and_the_pinned_number_of_types"
+        }
+      ]
+    },
+    {
+      "id": "the_halt_timeout_bounds_the_interrupt_and_the_wait_each_at_ten_seconds_at_most@tool_definition_td1_run_control",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_halt_timeout_bounds_the_interrupt_and_the_wait_each_at_ten_seconds_at_most"
+      ],
+      "cases_before": 8,
+      "cases_after": 8,
+      "reason": "Shorten the simulated setup timeout while preserving all eight halt cases and both production timeout arguments.",
+      "surviving_tests": [
+        "tests/test_tool_definition_td1_run_control.py::test_the_halt_timeout_bounds_the_interrupt_and_the_wait_each_at_ten_seconds_at_most"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/backends/gdbdebug.py",
+          "find": "timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S)\n        if timeout_s is not None:",
+          "replace": "timeout = self.config.debugger.timeout_s\n        if timeout_s is not None:",
+          "caught_before": "tests/test_tool_definition_td1_run_control.py::test_the_halt_timeout_bounds_the_interrupt_and_the_wait_each_at_ten_seconds_at_most[omitted]",
+          "caught_after": "tests/test_tool_definition_td1_run_control.py::test_the_halt_timeout_bounds_the_interrupt_and_the_wait_each_at_ten_seconds_at_most[omitted]"
+        }
+      ]
+    }
+  ]
+}

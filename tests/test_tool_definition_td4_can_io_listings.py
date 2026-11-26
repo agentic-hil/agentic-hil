@@ -56,6 +56,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import write_config
 from test_can_frame_and_routing import fake_can_module
+from test_mcp_result_text import assert_table
 from test_tool_definition_can import (
     FALSE,
     QueuedBus,
@@ -466,10 +467,13 @@ RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
 ]
 
 
-@pytest.mark.parametrize(("check", "matches", "refused"), RELATIONS, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(RELATIONS)])
-def test_each_relation_check_refuses_its_inverted_statement(check: Callable[[str], bool], matches: str, refused: str) -> None:
-    assert check(matches), matches
-    assert not check(refused), refused
+def test_each_relation_check_refuses_its_inverted_statement() -> None:
+    def check_row(check: Callable[[str], bool], matches: str, refused: str) -> None:
+        assert check(matches), matches
+        assert not check(refused), refused
+
+    rows = RELATIONS
+    assert_table(rows, check_row, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(RELATIONS)])
 
 
 # ---------------------------------------------------------------------------

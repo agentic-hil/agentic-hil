@@ -52,6 +52,8 @@ exclude tests/test_check_sbom_lock.py
 exclude tests/test_bench_image_store.py
 # The run lock's command is `tools/run_lock.py`, which never ships either.
 exclude tests/test_run_lock_command.py
+# The reduction inventory guard inspects test modules omitted from the sdist.
+exclude tests/test_suite_reduction.py
 # The tool-definition score is `tools/tool_definition_score.py`, which never
 # ships, and both of its tests import it at module scope.
 exclude tests/test_tool_definition_score.py

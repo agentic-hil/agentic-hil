@@ -63,6 +63,7 @@ from test_debug_sessions import (
 from test_debug_sessions import debug_service as session_service
 from test_esptool_backend import esptool_config, write_application
 from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
+from test_mcp_result_text import assert_table
 from test_openocd_access_denied import HostOs
 
 from agentic_hil import debugger, elfsymbols, gdbmi, tools
@@ -910,9 +911,16 @@ def test_every_pair_written_here_resolves_to_a_key_written_here() -> None:
     assert sorted((pair, catalogue_key(*pair)) for pair in WRITTEN_HERE if catalogue_key(*pair) not in WRITTEN_KEYS) == []
 
 
-@pytest.mark.parametrize(("error_type", "scope"), sorted(OWN_KEY_REQUIRED), ids=[f"{error_type}:{scope}" for error_type, scope in sorted(OWN_KEY_REQUIRED)])
-def test_a_refusal_the_bare_key_cannot_answer_has_its_own(error_type: str, scope: str) -> None:
-    assert f"{error_type}:{scope}" in ERROR_CATALOGUE, OWN_KEY_REQUIRED[(error_type, scope)]
+def test_a_refusal_the_bare_key_cannot_answer_has_its_own(reference: AgenticHILToolService) -> None:
+    def check_row(error_type: str, scope: str) -> None:
+        key = f"{error_type}:{scope}"
+        assert key in ERROR_CATALOGUE, OWN_KEY_REQUIRED[(error_type, scope)]
+        entry = read_resource(reference, key)
+        assert entry == catalogue_entry(key)
+        assert entry["error_type"] == error_type and entry["scope"] == scope, entry
+
+    rows = sorted(OWN_KEY_REQUIRED)
+    assert_table(rows, check_row, ids=[f"{error_type}:{scope}" for error_type, scope in sorted(OWN_KEY_REQUIRED)])
 
 
 # ---------------------------------------------------------------------------
@@ -1139,29 +1147,36 @@ def read_resource(service: AgenticHILToolService, key: str) -> dict:
 RESOLVED = sorted(INVENTORY - EXCLUDED, key=str)
 
 
-@pytest.mark.parametrize(("error_type", "scope"), RESOLVED, ids=[f"{error_type}-{scope}" for error_type, scope in RESOLVED])
-def test_the_reference_resolves_every_debug_refusal(reference: AgenticHILToolService, error_type: str, scope: str | None) -> None:
-    key = catalogue_key(error_type, scope)
-    # A pair with neither its scoped key nor a bare one falls back to a key the
-    # reference does not serve; named here rather than through the response.
-    if catalogue_entry(key) is None:
-        raise AssertionError(f"the errors reference has no entry for {error_type} under {scope}")
-    entry = read_resource(reference, key)
+def test_the_reference_resolves_every_debug_refusal(reference: AgenticHILToolService) -> None:
+    def check_row(error_type: str, scope: str | None) -> None:
+        key = catalogue_key(error_type, scope)
+        # A pair with neither its scoped key nor a bare one falls back to a key the
+        # reference does not serve; named here rather than through the response.
+        if catalogue_entry(key) is None:
+            raise AssertionError(f"the errors reference has no entry for {error_type} under {scope}")
+        entry = read_resource(reference, key)
 
-    assert entry == catalogue_entry(key)
-    assert entry["error_type"] == error_type
-    assert entry["meaning"].strip(), entry
-    assert [step for step in entry["remediation"] if step.strip()], entry
+        assert entry == catalogue_entry(key)
+        assert entry["error_type"] == error_type
+        assert entry["meaning"].strip(), entry
+        assert [step for step in entry["remediation"] if step.strip()], entry
+
+    rows = RESOLVED
+    assert_table(rows, check_row, ids=[f"{error_type}-{scope}" for error_type, scope in RESOLVED])
 
 
-@pytest.mark.parametrize("error_type", sorted(BARE_KEY_REQUIRED))
-def test_the_bare_entries_this_area_writes_resolve_at_their_own_uri(reference: AgenticHILToolService, error_type: str) -> None:
+def test_the_bare_entries_this_area_writes_resolve_at_their_own_uri(reference: AgenticHILToolService) -> None:
     """The exact bare key, not the scoped lookup's fallback: resources/read takes the key as it is given."""
-    assert error_type in ERROR_CATALOGUE, BARE_KEY_REQUIRED[error_type]
-    entry = read_resource(reference, error_type)
 
-    assert entry == catalogue_entry(error_type)
-    assert "scope" not in entry, entry
+    def check_row(error_type: str) -> None:
+        assert error_type in ERROR_CATALOGUE, BARE_KEY_REQUIRED[error_type]
+        entry = read_resource(reference, error_type)
+
+        assert entry == catalogue_entry(error_type)
+        assert "scope" not in entry, entry
+
+    rows = ((error_type,) for error_type in sorted(BARE_KEY_REQUIRED))
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -1417,35 +1432,38 @@ def test_every_key_written_here_has_a_contract() -> None:
     assert sorted(WRITTEN_KEYS ^ frozenset(CONTRACTS)) == []
 
 
-@pytest.mark.parametrize("key", sorted(CONTRACTS))
-def test_the_entry_says_what_its_producers_make_true(key: str) -> None:
-    contract = CONTRACTS[key]
-    entry = catalogue_entry(key)
-    assert entry is not None, f"no entry under {key}"
-    meaning: str = entry["meaning"]
-    steps: list[str] = entry["remediation"]
-    do_not: list[str] = entry.get("do_not", [])
+def test_the_entry_says_what_its_producers_make_true() -> None:
+    def check_row(key: str) -> None:
+        contract = CONTRACTS[key]
+        entry = catalogue_entry(key)
+        assert entry is not None, f"no entry under {key}"
+        meaning: str = entry["meaning"]
+        steps: list[str] = entry["remediation"]
+        do_not: list[str] = entry.get("do_not", [])
 
-    assert meaning.strip(), entry
-    assert steps and all(step.strip() for step in steps), entry
-    assert do_not and all(step.strip() for step in do_not), entry
-    for text in (meaning, *steps, *do_not):
-        assert not [character for character in FORBIDDEN_CHARACTERS if character in text], text
-    for pattern in contract.means:
-        assert re.search(pattern, meaning, re.IGNORECASE), (pattern, meaning)
-    for pattern in contract.steps:
-        assert first_affirmative_match(steps, pattern) is not None, (pattern, steps)
-    positions = [first_affirmative_match(steps, pattern) for pattern in contract.order]
-    assert None not in positions, (contract.order, steps)
-    assert positions == sorted(positions), (contract.order, positions, steps)  # type: ignore[type-var]
-    for said, condition in contract.beside:
-        holding = [step for step in steps if any(re.search(said, clause, re.IGNORECASE) for clause in affirmative_clauses(step))]
-        assert holding, (said, steps)
-        assert all(re.search(condition, step, re.IGNORECASE) for step in holding), (said, condition, holding)
-    for pattern in contract.avoid:
-        assert any(re.search(pattern, step, re.IGNORECASE) for step in do_not), (pattern, do_not)
-    for pattern in contract.never:
-        assert first_affirmative_match(steps, pattern) is None, (pattern, steps)
+        assert meaning.strip(), entry
+        assert steps and all(step.strip() for step in steps), entry
+        assert do_not and all(step.strip() for step in do_not), entry
+        for text in (meaning, *steps, *do_not):
+            assert not [character for character in FORBIDDEN_CHARACTERS if character in text], text
+        for pattern in contract.means:
+            assert re.search(pattern, meaning, re.IGNORECASE), (pattern, meaning)
+        for pattern in contract.steps:
+            assert first_affirmative_match(steps, pattern) is not None, (pattern, steps)
+        positions = [first_affirmative_match(steps, pattern) for pattern in contract.order]
+        assert None not in positions, (contract.order, steps)
+        assert positions == sorted(positions), (contract.order, positions, steps)  # type: ignore[type-var]
+        for said, condition in contract.beside:
+            holding = [step for step in steps if any(re.search(said, clause, re.IGNORECASE) for clause in affirmative_clauses(step))]
+            assert holding, (said, steps)
+            assert all(re.search(condition, step, re.IGNORECASE) for step in holding), (said, condition, holding)
+        for pattern in contract.avoid:
+            assert any(re.search(pattern, step, re.IGNORECASE) for step in do_not), (pattern, do_not)
+        for pattern in contract.never:
+            assert first_affirmative_match(steps, pattern) is None, (pattern, steps)
+
+    rows = ((key,) for key in sorted(CONTRACTS))
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -1462,49 +1480,56 @@ def offers_a_retried_stop(step: str) -> bool:
     return any("debug_stop_session" in clause and REPETITION.search(clause) for clause in affirmative_clauses(step))
 
 
-@pytest.mark.parametrize(
-    ("step", "expected_settles", "expected_retry"),
-    [
+def test_the_settle_detector_reads_each_clause_on_its_own() -> None:
+    def check_row(step: str, expected_settles: bool, expected_retry: bool) -> None:
+        assert settles(step) is expected_settles
+        assert offers_a_retried_stop(step) is expected_retry
+
+    rows = [
         ("Do not use probe_target. Retry debug_stop_session; it does not reset the target.", False, True),
         ("Call probe_target. Do not call debug_stop_session again; it cannot settle this.", True, False),
         ("Call probe_target; nothing else is needed.", True, False),
         ("Retry debug_stop_session; no reset is needed.", False, True),
         ("Never call probe_target.", False, False),
         ("Call debug_stop_session again, but not before probe_target.", False, True),
-    ],
-)
-def test_the_settle_detector_reads_each_clause_on_its_own(step: str, expected_settles: bool, expected_retry: bool) -> None:
-    assert settles(step) is expected_settles
-    assert offers_a_retried_stop(step) is expected_retry
+    ]
+    assert_table(rows, check_row)
 
 
 UNSETTLED_STOPS = [(proof.error_type, backend) for proof in gdbdebug._TEARDOWN_PROOFS for backend in INVENTORY_BY_TYPE[proof.error_type]]
 
 
-@pytest.mark.parametrize(("error_type", "backend"), UNSETTLED_STOPS, ids=[f"{error_type}-{backend}" for error_type, backend in UNSETTLED_STOPS])
-def test_an_unsettled_stop_names_the_call_that_settles_it(error_type: str, backend: str) -> None:
+def test_an_unsettled_stop_names_the_call_that_settles_it() -> None:
     """#637: a retried `debug_stop_session` repeats the first stop's answer and settles nothing
     (gdbdebug.py `stop_session`); the recovery probe_target runs first does."""
-    advice = remediation_fields(error_type, backend)
 
-    assert advice, f"no entry answers {error_type} under {backend}"
-    assert any(settles(step) for step in advice["remediation"]), advice["remediation"]
-    assert not [step for step in advice["remediation"] if offers_a_retried_stop(step)], advice["remediation"]
+    def check_row(error_type: str, backend: str) -> None:
+        advice = remediation_fields(error_type, backend)
+
+        assert advice, f"no entry answers {error_type} under {backend}"
+        assert any(settles(step) for step in advice["remediation"]), advice["remediation"]
+        assert not [step for step in advice["remediation"] if offers_a_retried_stop(step)], advice["remediation"]
+
+    rows = UNSETTLED_STOPS
+    assert_table(rows, check_row, ids=[f"{error_type}-{backend}" for error_type, backend in UNSETTLED_STOPS])
 
 
 # How many proofs a stop takes, in words: `_TEARDOWN_PROOFS` holds three since #624.
 PROOF_COUNTS = {2: r"\b(both|two)\s+(teardown\s+)?proofs\b", 3: r"\b(all three|three)\s+(teardown\s+)?proofs\b"}
 
 
-@pytest.mark.parametrize("key", ["cleanup_failed", *(proof.error_type for proof in gdbdebug._TEARDOWN_PROOFS)])
-def test_a_teardown_entry_counts_the_proofs_a_stop_takes(key: str) -> None:
-    entry = catalogue_entry(key)
-    assert entry is not None, key
-    text = " ".join([entry["meaning"], *entry["remediation"], *entry.get("do_not", [])])
+def test_a_teardown_entry_counts_the_proofs_a_stop_takes() -> None:
+    def check_row(key: str) -> None:
+        entry = catalogue_entry(key)
+        assert entry is not None, key
+        text = " ".join([entry["meaning"], *entry["remediation"], *entry.get("do_not", [])])
 
-    for count, pattern in PROOF_COUNTS.items():
-        if count != len(gdbdebug._TEARDOWN_PROOFS):
-            assert not re.search(pattern, text, re.IGNORECASE), (pattern, text)
+        for count, pattern in PROOF_COUNTS.items():
+            if count != len(gdbdebug._TEARDOWN_PROOFS):
+                assert not re.search(pattern, text, re.IGNORECASE), (pattern, text)
+
+    rows = ((key,) for key in ["cleanup_failed", *(proof.error_type for proof in gdbdebug._TEARDOWN_PROOFS)])
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------

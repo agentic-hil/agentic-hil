@@ -56,6 +56,7 @@ from test_debug_session_run_state import (
 )
 from test_debug_sessions import TIMEOUT_TEST_CAP_S, debug_service, start_debug_session, stlink_dump_service
 from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
+from test_mcp_result_text import assert_table
 from test_tool_definition_debug_sessions import (
     CEILING,
     CONFIGURED_DEBUGGER_TIMEOUT_DEFAULT,
@@ -1219,10 +1220,13 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
 ]
 
 
-@pytest.mark.parametrize(("check", "accepted", "refused"), SELF_TESTS, ids=[check.__name__ for check, _, _ in SELF_TESTS])
-def test_each_meaning_check_accepts_the_claim_and_refuses_its_inversion(check: Callable[[str], bool], accepted: list[str], refused: list[str]) -> None:
-    assert [text for text in accepted if not check(text)] == []
-    assert [text for text in refused if check(text)] == []
+def test_each_meaning_check_accepts_the_claim_and_refuses_its_inversion() -> None:
+    def check_row(check: Callable[[str], bool], accepted: list[str], refused: list[str]) -> None:
+        assert [text for text in accepted if not check(text)] == []
+        assert [text for text in refused if check(text)] == []
+
+    rows = SELF_TESTS
+    assert_table(rows, check_row, ids=[check.__name__ for check, _, _ in SELF_TESTS])
 
 
 # ---------------------------------------------------------------------------
@@ -1243,75 +1247,105 @@ def description(listed: dict[str, dict], name: str) -> str:
     return str(listed[name]["description"])
 
 
-@pytest.mark.parametrize("name", TOOLS)
-def test_each_tool_is_listed_with_every_input_property_described(listed: dict[str, dict], name: str) -> None:
-    assert name in listed, sorted(listed)
-    undescribed = sorted(prop for prop, text in property_texts(listed[name]).items() if not text.strip())
-    assert undescribed == [], (name, undescribed)
+def test_each_tool_is_listed_with_every_input_property_described(listed: dict[str, dict]) -> None:
+    def check_row(name: str) -> None:
+        assert name in listed, sorted(listed)
+        undescribed = sorted(prop for prop, text in property_texts(listed[name]).items() if not text.strip())
+        assert undescribed == [], (name, undescribed)
+
+    rows = ((name,) for name in TOOLS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", TOOLS)
-def test_each_definition_keeps_to_the_length_limits(listed: dict[str, dict], name: str) -> None:
-    tool = listed[name]
-    assert len(str(tool["description"])) <= DESCRIPTION_LIMIT, (name, len(str(tool["description"])))
-    too_long = {prop: len(text) for prop, text in property_texts(tool).items() if len(text) > PROPERTY_DESCRIPTION_LIMIT}
-    assert too_long == {}, (name, too_long)
+def test_each_definition_keeps_to_the_length_limits(listed: dict[str, dict]) -> None:
+    def check_row(name: str) -> None:
+        tool = listed[name]
+        assert len(str(tool["description"])) <= DESCRIPTION_LIMIT, (name, len(str(tool["description"])))
+        too_long = {prop: len(text) for prop, text in property_texts(tool).items() if len(text) > PROPERTY_DESCRIPTION_LIMIT}
+        assert too_long == {}, (name, too_long)
+
+    rows = ((name,) for name in TOOLS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", TOOLS)
-def test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on(listed: dict[str, dict], name: str) -> None:
+def test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on(listed: dict[str, dict]) -> None:
     """Typed sessions run on a GDB server: OpenOCD, pyOCD's `pyocd
     gdbserver`, or STM32CubeProgrammer's ST-LINK_gdbserver (#624), which the
     two lifecycle definitions name. STM32CubeProgrammer with no server answers
     every one of these calls with `not_supported` (stlink.py
     `_serves_session_tools`, common.py `debug_session_unsupported`;
     knowledge.py `not_supported:stlink`)."""
-    tool = listed[name]
-    assert needs_the_session_gdb_server(str(tool["description"])), tool["description"]
-    in_properties = {prop: text for prop, text in property_texts(tool).items() if any(names_a_server(backend, text) for backend in SESSION_NAMES)}
-    assert in_properties == {}, in_properties
+
+    def check_row(name: str) -> None:
+        tool = listed[name]
+        assert needs_the_session_gdb_server(str(tool["description"])), tool["description"]
+        in_properties = {prop: text for prop, text in property_texts(tool).items() if any(names_a_server(backend, text) for backend in SESSION_NAMES)}
+        assert in_properties == {}, in_properties
+
+    rows = ((name,) for name in TOOLS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", TOOLS)
-def test_each_description_names_the_session_it_works_in_and_the_one_debugger_it_binds(listed: dict[str, dict], name: str) -> None:
-    text = description(listed, name)
+def test_each_description_names_the_session_it_works_in_and_the_one_debugger_it_binds(listed: dict[str, dict]) -> None:
+    def check_row(name: str) -> None:
+        text = description(listed, name)
 
-    assert re.search(rf"\b{START}\b", text), text
-    assert names_the_one_bound_debugger(text), text
+        assert re.search(rf"\b{START}\b", text), text
+        assert names_the_one_bound_debugger(text), text
+
+    rows = ((name,) for name in TOOLS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", REFUSE_WITHOUT_SESSION)
-def test_the_tools_that_need_a_session_say_what_they_answer_without_one(listed: dict[str, dict], name: str) -> None:
+def test_the_tools_that_need_a_session_say_what_they_answer_without_one(listed: dict[str, dict]) -> None:
     """gdbdebug.py `_require_session`: no session, or one that has stopped,
     answers `session_not_active`."""
-    assert refuses_without_a_session(description(listed, name)), description(listed, name)
+
+    def check_row(name: str) -> None:
+        assert refuses_without_a_session(description(listed, name)), description(listed, name)
+
+    rows = ((name,) for name in REFUSE_WITHOUT_SESSION)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", ANSWER_WITHOUT_SESSION)
-def test_the_two_reads_say_they_answer_ok_and_inactive_without_a_session(listed: dict[str, dict], name: str) -> None:
-    assert answers_ok_and_inactive_without_a_session(description(listed, name)), description(listed, name)
+def test_the_two_reads_say_they_answer_ok_and_inactive_without_a_session(listed: dict[str, dict]) -> None:
+    def check_row(name: str) -> None:
+        assert answers_ok_and_inactive_without_a_session(description(listed, name)), description(listed, name)
+
+    rows = ((name,) for name in ANSWER_WITHOUT_SESSION)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", READS)
-def test_the_reads_say_they_never_move_the_core(listed: dict[str, dict], name: str) -> None:
-    assert never_moves_the_core(description(listed, name)), description(listed, name)
+def test_the_reads_say_they_never_move_the_core(listed: dict[str, dict]) -> None:
+    def check_row(name: str) -> None:
+        assert never_moves_the_core(description(listed, name)), description(listed, name)
+
+    rows = ((name,) for name in READS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", (STATUS, STOP_REASON))
-def test_status_and_stop_reason_say_they_record_an_arrived_stop_and_answer_an_abnormal_one(listed: dict[str, dict], name: str) -> None:
+def test_status_and_stop_reason_say_they_record_an_arrived_stop_and_answer_an_abnormal_one(listed: dict[str, dict]) -> None:
     """Both take in a stop GDB delivered since the last call (gdbdebug.py
     `_refresh_session_stop`) and answer an abnormal one as a good read with a
     bad target (`target_stop_fields`)."""
-    text = description(listed, name)
 
-    assert records_a_newly_arrived_stop(text), text
-    assert an_abnormal_stop_is_a_good_read(text), text
+    def check_row(name: str) -> None:
+        text = description(listed, name)
+
+        assert records_a_newly_arrived_stop(text), text
+        assert an_abnormal_stop_is_a_good_read(text), text
+
+    rows = ((name,) for name in (STATUS, STOP_REASON))
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("name", TOOLS)
-def test_every_stop_reason_a_definition_lists_is_one_the_code_produces(listed: dict[str, dict], name: str) -> None:
-    assert "fault" not in PRODUCED_STOP_REASONS
-    assert names_only_produced_stop_reasons(definition_text(listed[name])), definition_text(listed[name])
+def test_every_stop_reason_a_definition_lists_is_one_the_code_produces(listed: dict[str, dict]) -> None:
+    def check_row(name: str) -> None:
+        assert "fault" not in PRODUCED_STOP_REASONS
+        assert names_only_produced_stop_reasons(definition_text(listed[name])), definition_text(listed[name])
+
+    rows = ((name,) for name in TOOLS)
+    assert_table(rows, check_row)
 
 
 def test_halt_says_it_stops_the_core_and_keeps_the_session(listed: dict[str, dict]) -> None:
@@ -1418,11 +1452,14 @@ def test_stop_reason_names_its_fields_and_what_it_answers_before_any_stop(listed
     assert nothing_stopped_yet_is_its_own_outcome(text), text
 
 
-@pytest.mark.parametrize("name", TOOLS)
-def test_every_identifier_a_definition_names_exists(listed: dict[str, dict], known_literals: set[str], name: str) -> None:
-    tool = listed[name]
+def test_every_identifier_a_definition_names_exists(listed: dict[str, dict], known_literals: set[str]) -> None:
+    def check_row(name: str) -> None:
+        tool = listed[name]
 
-    assert unknown_identifiers(definition_text(tool), listed, tool, known_literals) == []
+        assert unknown_identifiers(definition_text(tool), listed, tool, known_literals) == []
+
+    rows = ((name,) for name in TOOLS)
+    assert_table(rows, check_row)
 
 
 def test_the_annotations_agree_with_what_the_definitions_describe(listed: dict[str, dict]) -> None:
@@ -1628,7 +1665,19 @@ def test_the_halt_timeout_bounds_the_interrupt_and_the_wait_each_at_ten_seconds_
     waits: list = []
     try:
         assert start_debug_session(service, mode="attach")["ok"] is True
-        running = service.call(CONTINUE, {"timeout_s": UNREACHABLE_STOP_TIMEOUT_S})
+        assert debug.session is not None
+        # The fake ignores the first interrupt. Shorten that wait without
+        # changing the continue command's acknowledgement budget.
+        with monkeypatch.context() as setup:
+            original_command = debug._gdb_command
+
+            def setup_command(session, command, timeout_s=None, **kwargs):
+                if command == INTERRUPT_COMMAND:
+                    timeout_s = 0.1
+                return original_command(session, command, timeout_s, **kwargs)
+
+            setup.setattr(debug, "_gdb_command", setup_command)
+            running = service.call(CONTINUE, {"timeout_s": UNREACHABLE_STOP_TIMEOUT_S})
         assert running["session"]["status"] == "running", running
         if entry != 20.0:
             with_entry_timeout(debug, monkeypatch, entry)

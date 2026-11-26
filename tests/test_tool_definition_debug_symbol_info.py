@@ -32,6 +32,7 @@ from test_debug_sessions import (
 )
 from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
 from test_mcp_envelope import TOOLS_LIST, real_service, tools_call
+from test_mcp_result_text import assert_table
 
 from agentic_hil.backends.gdbdebug import DEBUG_SYMBOL_PATTERN
 from agentic_hil.config import debug_interface_config
@@ -370,9 +371,11 @@ def explains(text: str, error_type: str) -> bool:
 # --- the checks accept paraphrases and reject inversions ----------------------
 
 
-@pytest.mark.parametrize(
-    ("check", "text", "accepted"),
-    [
+def test_each_check_accepts_a_paraphrase_and_rejects_an_inversion() -> None:
+    def check_row(check: Callable[[str], bool], text: str, accepted: bool) -> None:
+        assert bool(check(text)) is accepted, (check.__name__, text)
+
+    rows = [
         (names_symbol_syntax, "C identifier, optionally ::-qualified, e.g. boot_counter.", True),
         (names_symbol_syntax, "A C identifier or a C++ name qualified with ::, for example motor::speed.", True),
         (names_symbol_syntax, "C identifier that must be ::-qualified, e.g. app::boot_counter.", False),
@@ -467,15 +470,15 @@ def explains(text: str, error_type: str) -> bool:
         (tells_it_apart_from_the_memory_reads, "Reads target memory; for bytes use debug_symbol_value, for Intel HEX debug_dump_symbol_ihex.", False),
         (tells_it_apart_from_the_memory_reads, "No memory read; for bytes use debug_symbol_value, debug_dump_symbol_ihex never writes Intel HEX.", False),
         (tells_it_apart_from_the_memory_reads, "debug_symbol_value reads no memory, for Intel HEX debug_dump_symbol_ihex.", False),
-    ],
-)
-def test_each_check_accepts_a_paraphrase_and_rejects_an_inversion(check: Callable[[str], bool], text: str, accepted: bool) -> None:
-    assert bool(check(text)) is accepted, (check.__name__, text)
+    ]
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("text", "error_type", "accepted"),
-    [
+def test_the_refusal_check_wants_the_circumstance_beside_the_code() -> None:
+    def check_row(text: str, error_type: str, accepted: bool) -> None:
+        assert explains(text, error_type) is accepted, text
+
+    rows = [
         ("Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true, else permission_denied.", "permission_denied", True),
         ("OpenOCD needs an active debug_start_session (else session_not_active).", "session_not_active", True),
         ("Else symbol_source_not_available: nothing was flashed with flash_firmware.", "symbol_source_not_available", True),
@@ -484,10 +487,8 @@ def test_each_check_accepts_a_paraphrase_and_rejects_an_inversion(check: Callabl
         ("Refusals are success: permission_denied, session_not_active, symbol_not_found.", "permission_denied", False),
         ("Refusals: permission_denied, session_not_active, symbol_not_found.", "symbol_not_found", False),
         ("symbol_source_changed is returned.", "symbol_source_changed", False),
-    ],
-)
-def test_the_refusal_check_wants_the_circumstance_beside_the_code(text: str, error_type: str, accepted: bool) -> None:
-    assert explains(text, error_type) is accepted, text
+    ]
+    assert_table(rows, check_row)
 
 
 # --- the symbol parameter -----------------------------------------------------

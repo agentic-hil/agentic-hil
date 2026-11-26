@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 import pytest
+from _pytest.mark.structures import ParameterSet
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 from result_text import assert_text_projects, text_document
 from test_mcp_envelope import RecordingService, lines, serve, tools_call
@@ -42,6 +44,29 @@ from agentic_hil.mcp import handle_mcp_message
 
 ERRORS = "agentic-hil://reference/errors/"
 FLASH_PERMISSION = permission_key("debuggers", "dut", "allow_flash")
+
+
+def assert_table(
+    rows: Iterable[tuple | ParameterSet], check: Callable[..., None], *, ids: Sequence[str] | None = None
+) -> None:
+    """Run the complete table and report each bad row with its ID or values."""
+    problems = []
+    for index, row in enumerate(rows):
+        row_number = f"row {index + 1}"
+        label = ids[index] if ids is not None else None
+        if isinstance(row, ParameterSet):
+            label = row.id if isinstance(row.id, str) else label
+            assert not row.marks, f"{label or row_number} still has pytest marks"
+            row = row.values
+        try:
+            check(*row)
+        except (Exception, pytest.fail.Exception) as error:
+            if label is None:
+                values = "-".join(str(value) for value in row if isinstance(value, (str, int, float)) or value is None)
+                label = f"{values} ({row_number})" if values else row_number
+            problems.append(f"{label}: {type(error).__name__}: {error}")
+    assert not problems, "\n".join(problems)
+
 
 # Exactly the top-level pairs the text leaves out as defaults.
 DEFAULT_PAIRS = {
@@ -463,44 +488,48 @@ def test_the_exclusive_refusal_names_its_own_scoped_entry() -> None:
     assert [step.replace(PERMISSION_KEY_PLACEHOLDER, blocking) for step in entry["remediation"]] == built["remediation"], entry
 
 
-@pytest.mark.parametrize("key", list(ERROR_CATALOGUE))
-def test_every_catalogue_entry_is_named_by_the_advice_it_left_out(key: str) -> None:
+def test_every_catalogue_entry_is_named_by_the_advice_it_left_out() -> None:
     """Every catalogue entry, scoped and unscoped. A result carries the entry's
     advice the way the services attach it, with the permission key an entry
     written around one is filled with, and is sent twice in one session. The
     second text leaves the remediation out and `advice_uri` names this entry,
     which serves every entry left out once its placeholder holds the result's
     key."""
-    error_type, _, scope = key.partition(":")
-    permission = None if remediation_fields(error_type, scope or None) else FLASH_PERMISSION
-    built = {
-        "ok": False,
-        "tool": "probe_target",
-        "error_type": error_type,
-        "summary": f"Refused as {key}.",
-        **(permission_denied_fields(permission) if permission else {}),
-        **remediation_fields(error_type, scope or None, permission=permission),
-    }
-    assert built["remediation"], built
 
-    first, second = one_session(built, built)
+    def check_row(key: str) -> None:
+        error_type, _, scope = key.partition(":")
+        permission = None if remediation_fields(error_type, scope or None) else FLASH_PERMISSION
+        built = {
+            "ok": False,
+            "tool": "probe_target",
+            "error_type": error_type,
+            "summary": f"Refused as {key}.",
+            **(permission_denied_fields(permission) if permission else {}),
+            **remediation_fields(error_type, scope or None, permission=permission),
+        }
+        assert built["remediation"], built
 
-    for result in (first, second):
-        assert result["structuredContent"] == built, result
-        assert result["isError"] is True, result
-    assert text_document(first) == built, first
-    sent = text_document(second)
-    assert sent == {
-        **without(built, "remediation"),
-        "repeated_advice": {"remediation": len(built["remediation"])},
-        "advice_uri": ERRORS + key,
-    }, second
-    served = served_entry(sent["advice_uri"])["remediation"]
-    if permission:
-        served = [step.replace(PERMISSION_KEY_PLACEHOLDER, permission) for step in served]
-    assert [step for step in built["remediation"] if step not in served] == [], (served, second)
-    for result in (first, second):
-        assert_text_projects(result)
+        first, second = one_session(built, built)
+
+        for result in (first, second):
+            assert result["structuredContent"] == built, result
+            assert result["isError"] is True, result
+        assert text_document(first) == built, first
+        sent = text_document(second)
+        assert sent == {
+            **without(built, "remediation"),
+            "repeated_advice": {"remediation": len(built["remediation"])},
+            "advice_uri": ERRORS + key,
+        }, second
+        served = served_entry(sent["advice_uri"])["remediation"]
+        if permission:
+            served = [step.replace(PERMISSION_KEY_PLACEHOLDER, permission) for step in served]
+        assert [step for step in built["remediation"] if step not in served] == [], (served, second)
+        for result in (first, second):
+            assert_text_projects(result)
+
+    rows = ((key,) for key in list(ERROR_CATALOGUE))
+    assert_table(rows, check_row)
 
 
 def test_advice_without_a_catalogue_entry_is_counted_and_names_no_uri(monkeypatch: pytest.MonkeyPatch) -> None:

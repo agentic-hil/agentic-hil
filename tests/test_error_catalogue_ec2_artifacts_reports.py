@@ -53,6 +53,7 @@ from test_debug_sessions import debug_service, start_debug_session
 from test_flash_capture import PORT_ID, flash_args
 from test_flash_capture import config_for as capture_config
 from test_mcp_reference_resources import read_text
+from test_mcp_result_text import assert_table
 
 import agentic_hil
 from agentic_hil import bootstrap
@@ -667,15 +668,18 @@ def test_the_entries_this_issue_relies_on_are_there() -> None:
     assert sorted(value for value in COVERED if value not in ERROR_CATALOGUE) == []
 
 
-@pytest.mark.parametrize("key", NEW_KEYS)
-def test_each_new_entry_is_complete(key: str) -> None:
-    assert key in ERROR_CATALOGUE, f"no catalogue entry for {key}"
-    entry = catalogue_entry(key)
-    assert isinstance(entry["meaning"], str) and entry["meaning"].strip(), key
-    for field in ("remediation", "do_not"):
-        steps = entry.get(field)
-        assert isinstance(steps, list) and steps, f"{key} has no {field}"
-        assert all(isinstance(step, str) and step.strip() for step in steps), (key, field)
+def test_each_new_entry_is_complete() -> None:
+    def check_row(key: str) -> None:
+        assert key in ERROR_CATALOGUE, f"no catalogue entry for {key}"
+        entry = catalogue_entry(key)
+        assert isinstance(entry["meaning"], str) and entry["meaning"].strip(), key
+        for field in ("remediation", "do_not"):
+            steps = entry.get(field)
+            assert isinstance(steps, list) and steps, f"{key} has no {field}"
+            assert all(isinstance(step, str) and step.strip() for step in steps), (key, field)
+
+    rows = ((key,) for key in NEW_KEYS)
+    assert_table(rows, check_row)
 
 
 def test_the_report_reader_left_out_has_no_caller() -> None:
@@ -953,14 +957,21 @@ def test_every_new_key_has_its_facts() -> None:
     assert set(FACTS) == set(NEW_KEYS)
 
 
-@pytest.mark.parametrize("key", NEW_KEYS)
-def test_each_new_entry_says_what_its_refusal_means_and_what_to_do(key: str) -> None:
-    assert fact_problems(key, FACTS[key]) == []
+def test_each_new_entry_says_what_its_refusal_means_and_what_to_do() -> None:
+    def check_row(key: str) -> None:
+        assert fact_problems(key, FACTS[key]) == []
+
+    rows = ((key,) for key in NEW_KEYS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("key", "inverted"),
-    [
+def test_the_meaning_check_refuses_an_inverted_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    def check_row(key: str, inverted: ErrorRemedy) -> None:
+        with monkeypatch.context() as row_patch:
+            row_patch.setitem(ERROR_CATALOGUE, key, inverted)
+            assert fact_problems(key, FACTS[key])
+
+    rows = [
         (
             "artifact_staging_failed",
             ErrorRemedy(
@@ -977,11 +988,8 @@ def test_each_new_entry_says_what_its_refusal_means_and_what_to_do(key: str) -> 
                 do_not=("Do not use project_config_set.",),
             ),
         ),
-    ],
-)
-def test_the_meaning_check_refuses_an_inverted_entry(monkeypatch: pytest.MonkeyPatch, key: str, inverted: ErrorRemedy) -> None:
-    monkeypatch.setitem(ERROR_CATALOGUE, key, inverted)
-    assert fact_problems(key, FACTS[key])
+    ]
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -997,10 +1005,13 @@ def tools(tmp_path: Path) -> Iterator[AgenticHILToolService]:
         service.close()
 
 
-@pytest.mark.parametrize("key", NEW_KEYS)
-def test_each_new_entry_resolves_as_a_reference_resource(tools: AgenticHILToolService, key: str) -> None:
-    assert key in ERROR_CATALOGUE, f"no catalogue entry for {key}"
-    assert json.loads(read_text(tools, ERROR_URI_PREFIX + key)) == catalogue_entry(key)
+def test_each_new_entry_resolves_as_a_reference_resource(tools: AgenticHILToolService) -> None:
+    def check_row(key: str) -> None:
+        assert key in ERROR_CATALOGUE, f"no catalogue entry for {key}"
+        assert json.loads(read_text(tools, ERROR_URI_PREFIX + key)) == catalogue_entry(key)
+
+    rows = ((key,) for key in NEW_KEYS)
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------
