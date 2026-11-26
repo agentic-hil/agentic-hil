@@ -42,6 +42,7 @@ import pytest
 import yaml
 from conftest import write_authoritative_config, write_config
 from support import scaled_time_bound
+from test_mcp_result_text import assert_table
 
 from agentic_hil import __version__
 from agentic_hil.config import load_config
@@ -247,27 +248,28 @@ def mean_pairs(report: dict) -> list[tuple[Fraction, Fraction]]:
 # --- round1 and the tiers (Computing the score, Tiers) ------------------------
 
 
-@pytest.mark.parametrize(
-    ("p", "q", "expected"),
-    [
-        pytest.param(285, 100, "2.9", id="the-worked-example"),
-        pytest.param(25, 100, "0.3", id="tie-goes-up"),
-        pytest.param(35, 100, "0.4", id="tie-goes-up-where-bankers-rounding-also-goes-up"),
-        pytest.param(345, 100, "3.5", id="tie-on-the-a-boundary"),
-        pytest.param(13, 4, "3.3", id="coherence-sum-13-python-round-says-3.2"),
-        pytest.param(17, 4, "4.3", id="coherence-sum-17-python-round-says-4.2"),
-        pytest.param(5, 4, "1.3", id="coherence-sum-5-python-round-says-1.2"),
-        pytest.param(1, 3, "0.3", id="below-the-tie"),
-        pytest.param(2, 3, "0.7", id="above-the-tie"),
-        pytest.param(50, 10, "5.0", id="already-one-decimal"),
-    ],
-)
-def test_round1_is_half_up_on_the_exact_rational(p: int, q: int, expected: str) -> None:
+def test_round1_is_half_up_on_the_exact_rational() -> None:
     """round1(p, q) = floor((20p + q) / (2q)) / 10, returned as an exact rational."""
-    result = tds.round1(p, q)
 
-    assert isinstance(result, Fraction)
-    assert result == Fraction(expected)
+    def check_row(p: int, q: int, expected: str) -> None:
+        result = tds.round1(p, q)
+
+        assert isinstance(result, Fraction)
+        assert result == Fraction(expected)
+
+    rows = [
+        (285, 100, '2.9'),
+        (25, 100, '0.3'),
+        (35, 100, '0.4'),
+        (345, 100, '3.5'),
+        (13, 4, '3.3'),
+        (17, 4, '4.3'),
+        (5, 4, '1.3'),
+        (1, 3, '0.3'),
+        (2, 3, '0.7'),
+        (50, 10, '5.0'),
+    ]
+    assert_table(rows, check_row, ids=['the-worked-example', 'tie-goes-up', 'tie-goes-up-where-bankers-rounding-also-goes-up', 'tie-on-the-a-boundary', 'coherence-sum-13-python-round-says-3.2', 'coherence-sum-17-python-round-says-4.2', 'coherence-sum-5-python-round-says-1.2', 'below-the-tie', 'above-the-tie', 'already-one-decimal'])
 
 
 def test_round1_refuses_a_float() -> None:
@@ -276,12 +278,12 @@ def test_round1_refuses_a_float() -> None:
         tds.round1(2.85, 1)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize(
-    ("score", "letter"),
-    [("5.0", "A"), ("3.5", "A"), ("3.4", "B"), ("3.0", "B"), ("2.9", "C"), ("2.0", "C"), ("1.9", "D"), ("1.0", "D"), ("0.9", "F")],
-)
-def test_tier_boundaries(score: str, letter: str) -> None:
-    assert tds.tier(Fraction(score)) == letter
+def test_tier_boundaries() -> None:
+    def check_row(score: str, letter: str) -> None:
+        assert tds.tier(Fraction(score)) == letter
+
+    rows = [("5.0", "A"), ("3.5", "A"), ("3.4", "B"), ("3.0", "B"), ("2.9", "C"), ("2.0", "C"), ("1.9", "D"), ("1.0", "D"), ("0.9", "F")]
+    assert_table(rows, check_row)
 
 
 # --- computeTdqs (Computing the score) ----------------------------------------
@@ -293,22 +295,22 @@ def test_the_dimensions_and_weights_are_the_published_ones() -> None:
     assert sum(PUBLISHED_WEIGHTS.values()) == 100
 
 
-@pytest.mark.parametrize(
-    ("values", "expected", "letter"),
-    [
-        pytest.param((4, 2, 2, 3, 4, 2), "2.9", "C", id="the-worked-example-285-hundredths"),
-        pytest.param((4, 3, 3, 4, 4, 4), "3.6", "A", id="360-hundredths"),
-        pytest.param((5, 4, 4, 4, 4, 4), "4.3", "A", id="425-hundredths-tie"),
-        pytest.param((3, 2, 2, 2, 3, 3), "2.5", "C", id="245-hundredths-tie"),
-        pytest.param((5, 5, 5, 5, 5, 5), "5.0", "A", id="ceiling"),
-        pytest.param((1, 1, 1, 1, 1, 1), "1.0", "D", id="floor"),
-    ],
-)
-def test_compute_tdqs(values: tuple[int, ...], expected: str, letter: str) -> None:
-    tdqs = tds.compute_tdqs(scores(*values))
+def test_compute_tdqs() -> None:
+    def check_row(values: tuple[int, ...], expected: str, letter: str) -> None:
+        tdqs = tds.compute_tdqs(scores(*values))
 
-    assert tdqs == Fraction(expected)
-    assert tds.tier(tdqs) == letter
+        assert tdqs == Fraction(expected)
+        assert tds.tier(tdqs) == letter
+
+    rows = [
+        ((4, 2, 2, 3, 4, 2), '2.9', 'C'),
+        ((4, 3, 3, 4, 4, 4), '3.6', 'A'),
+        ((5, 4, 4, 4, 4, 4), '4.3', 'A'),
+        ((3, 2, 2, 2, 3, 3), '2.5', 'C'),
+        ((5, 5, 5, 5, 5, 5), '5.0', 'A'),
+        ((1, 1, 1, 1, 1, 1), '1.0', 'D'),
+    ]
+    assert_table(rows, check_row, ids=['the-worked-example-285-hundredths', '360-hundredths', '425-hundredths-tie', '245-hundredths-tie', 'ceiling', 'floor'])
 
 
 def test_compute_tdqs_lands_in_a_where_float_weights_land_in_b() -> None:
@@ -340,13 +342,13 @@ def test_description_quality_rounds_an_exact_tie_up() -> None:
     assert tds.description_quality([Fraction("2.6"), Fraction("2.9"), Fraction("2.9"), Fraction("5.0")]) == Fraction("3.1")
 
 
-@pytest.mark.parametrize(
-    ("values", "expected"),
-    [((4, 3, 3, 3), "3.3"), ((5, 4, 4, 4), "4.3"), ((2, 1, 1, 1), "1.3"), ((4, 4, 4, 4), "4.0"), ((5, 5, 5, 4), "4.8")],
-)
-def test_coherence_is_the_half_up_mean_of_its_four_dimensions(values: tuple[int, int, int, int], expected: str) -> None:
-    assert tuple(tds.COHERENCE_DIMENSIONS) == COHERENCE_DIMENSIONS
-    assert tds.coherence_score(dict(zip(COHERENCE_DIMENSIONS, values, strict=True))) == Fraction(expected)
+def test_coherence_is_the_half_up_mean_of_its_four_dimensions() -> None:
+    def check_row(values: tuple[int, int, int, int], expected: str) -> None:
+        assert tuple(tds.COHERENCE_DIMENSIONS) == COHERENCE_DIMENSIONS
+        assert tds.coherence_score(dict(zip(COHERENCE_DIMENSIONS, values, strict=True))) == Fraction(expected)
+
+    rows = [((4, 3, 3, 3), "3.3"), ((5, 4, 4, 4), "4.3"), ((2, 1, 1, 1), "1.3"), ((4, 4, 4, 4), "4.0"), ((5, 5, 5, 4), "4.8")]
+    assert_table(rows, check_row)
 
 
 def test_overall_lands_in_a_where_floats_publish_b() -> None:
@@ -386,16 +388,20 @@ def test_rollups_report_counts_the_minimum_tool_and_every_score() -> None:
     assert rollups["overallTier"] == "B"
 
 
-@pytest.mark.parametrize(("scored", "total"), [(2, 3), (4, 5), (43, 44)], ids=["2-of-3", "4-of-5", "43-of-44"])
-def test_rollups_refuse_an_unscored_tool(scored: int, total: int) -> None:
+def test_rollups_refuse_an_unscored_tool() -> None:
     """The registry rolls up at 80 % coverage; the gate needs every tool scored.
     4 of 5 is exactly the registry's threshold and 43 of 44 is above it."""
-    assert issubclass(tds.IncompleteResult, tds.InvalidComparison)
-    names = [f"tool_{index:02d}" for index in range(total)]
-    results = {name: {"tdqs": Fraction("4.0")} for name in names[:scored]}
 
-    with pytest.raises(tds.IncompleteResult, match=names[-1]):
-        tds.rollups(results, names, {"coherenceScore": Fraction("4.0")})
+    def check_row(scored: int, total: int) -> None:
+        assert issubclass(tds.IncompleteResult, tds.InvalidComparison)
+        names = [f"tool_{index:02d}" for index in range(total)]
+        results = {name: {"tdqs": Fraction("4.0")} for name in names[:scored]}
+
+        with pytest.raises(tds.IncompleteResult, match=names[-1]):
+            tds.rollups(results, names, {"coherenceScore": Fraction("4.0")})
+
+    rows = [(2, 3), (4, 5), (43, 44)]
+    assert_table(rows, check_row, ids=["2-of-3", "4-of-5", "43-of-44"])
 
 
 # --- context signals (Stage 1) ------------------------------------------------
@@ -438,16 +444,20 @@ def test_context_signals_of_the_published_example() -> None:
     assert signals["annotationValues"] == {"readOnly": None, "destructive": None, "idempotent": None, "openWorld": None}
 
 
-@pytest.mark.parametrize(("described", "total", "coverage"), [(0, 0, 100), (2, 3, 67), (1, 3, 33), (3, 3, 100), (0, 2, 0)])
-def test_schema_description_coverage(described: int, total: int, coverage: int) -> None:
+def test_schema_description_coverage() -> None:
     """round(described / total x 100), and 100 for a tool with no parameters."""
-    properties = {f"p{index}": {"type": "string", **({"description": f"Parameter {index}."} if index < described else {})} for index in range(total)}
 
-    signals = tds.context_signals(tool("t", schema={"type": "object", "properties": properties}))
+    def check_row(described: int, total: int, coverage: int) -> None:
+        properties = {f"p{index}": {"type": "string", **({"description": f"Parameter {index}."} if index < described else {})} for index in range(total)}
 
-    assert signals["paramCount"] == total
-    assert signals["paramsWithDescriptions"] == described
-    assert signals["schemaDescriptionCoverage"] == coverage
+        signals = tds.context_signals(tool("t", schema={"type": "object", "properties": properties}))
+
+        assert signals["paramCount"] == total
+        assert signals["paramsWithDescriptions"] == described
+        assert signals["schemaDescriptionCoverage"] == coverage
+
+    rows = [(0, 0, 100), (2, 3, 67), (1, 3, 33), (3, 3, 100), (0, 2, 0)]
+    assert_table(rows, check_row)
 
 
 def test_enums_and_nested_objects_are_counted() -> None:
@@ -471,20 +481,24 @@ def test_enums_and_nested_objects_are_counted() -> None:
 ANNOTATION_HINTS = {"readOnlyHint": "readOnly", "destructiveHint": "destructive", "idempotentHint": "idempotent", "openWorldHint": "openWorld"}
 
 
-@pytest.mark.parametrize("hint", sorted(ANNOTATION_HINTS))
-@pytest.mark.parametrize("value", [True, False, "absent", "yes"], ids=["true", "false", "absent", "not-a-boolean"])
-def test_each_annotation_hint_is_read_on_its_own(hint: str, value: object) -> None:
+def test_each_annotation_hint_is_read_on_its_own() -> None:
     """Each hint reads as declared true, declared false, or undeclared (None); a value
     that is not a boolean declares nothing. The other three stay undeclared."""
-    annotations = {"title": "A title"} if value == "absent" else {"title": "A title", hint: value}
 
-    signals = tds.context_signals(tool("t", annotations=annotations))
+    def check_row(hint: str, value: object) -> None:
+        annotations = {"title": "A title"} if value == "absent" else {"title": "A title", hint: value}
 
-    expected = dict.fromkeys(ANNOTATION_HINTS.values())
-    if isinstance(value, bool):
-        expected[ANNOTATION_HINTS[hint]] = value
-    assert signals["annotationValues"] == expected
-    assert signals["hasAnnotations"] is True
+        signals = tds.context_signals(tool("t", annotations=annotations))
+
+        expected = dict.fromkeys(ANNOTATION_HINTS.values())
+        if isinstance(value, bool):
+            expected[ANNOTATION_HINTS[hint]] = value
+        assert signals["annotationValues"] == expected
+        assert signals["hasAnnotations"] is True
+
+    values = [(True, "true"), (False, "false"), ("absent", "absent"), ("yes", "not-a-boolean")]
+    rows = (pytest.param(hint, value, id=f"{value_id}-{hint}") for value, value_id in values for hint in sorted(ANNOTATION_HINTS))
+    assert_table(rows, check_row)
 
 
 def test_empty_or_absent_annotations_are_no_annotations() -> None:
@@ -492,24 +506,24 @@ def test_empty_or_absent_annotations_are_no_annotations() -> None:
     assert tds.context_signals(tool("t"))["hasAnnotations"] is False
 
 
-@pytest.mark.parametrize(
-    ("output_schema", "present"),
-    [("absent", False), ({}, False), ({"type": "object", "properties": {"ok": {"type": "boolean"}}}, True)],
-)
-def test_has_output_schema(output_schema: object, present: bool) -> None:
-    definition = tool("t") if output_schema == "absent" else tool("t", outputSchema=output_schema)
+def test_has_output_schema() -> None:
+    def check_row(output_schema: object, present: bool) -> None:
+        definition = tool("t") if output_schema == "absent" else tool("t", outputSchema=output_schema)
 
-    assert tds.context_signals(definition)["hasOutputSchema"] is present
+        assert tds.context_signals(definition)["hasOutputSchema"] is present
+
+    rows = [("absent", False), ({}, False), ({"type": "object", "properties": {"ok": {"type": "boolean"}}}, True)]
+    assert_table(rows, check_row, ids=["absent-False", "output_schema1-False", "output_schema2-True"])
 
 
-@pytest.mark.parametrize(
-    ("title", "meaningful"),
-    [(None, False), ("run_tests", False), ("Run", False), ("Run the test suite", True)],
-)
-def test_title_is_meaningful_when_it_exists_differs_and_is_longer(title: str | None, meaningful: bool) -> None:
-    definition = tool("run_tests") if title is None else tool("run_tests", title=title)
+def test_title_is_meaningful_when_it_exists_differs_and_is_longer() -> None:
+    def check_row(title: str | None, meaningful: bool) -> None:
+        definition = tool("run_tests") if title is None else tool("run_tests", title=title)
 
-    assert tds.context_signals(definition)["titleIsMeaningful"] is meaningful
+        assert tds.context_signals(definition)["titleIsMeaningful"] is meaningful
+
+    rows = [(None, False), ("run_tests", False), ("Run", False), ("Run the test suite", True)]
+    assert_table(rows, check_row)
 
 
 def test_the_title_is_the_top_level_one_not_the_annotation_title() -> None:
@@ -674,50 +688,54 @@ def cost_signals(schema: dict) -> tuple[int, int, int, int]:
     return (signals["requiredFieldCount"], signals["schemaDepth"], signals["unionChoiceCount"], signals["invocationCost"])
 
 
-@pytest.mark.parametrize(
-    ("schema", "expected"),
-    [
-        pytest.param(FOUR_FLAT, (4, 1, 0, 4), id="four-required-scalars-cost-4"),
-        pytest.param(EIGHT_FLAT, (8, 1, 0, 8), id="eight-flat-cost-8"),
-        pytest.param(EIGHT_WRAPPED, (9, 2, 0, 11), id="eight-wrapped-cost-11"),
-        pytest.param(QUERY_PANEL, (5, 3, 2, 13), id="the-13-example"),
-        pytest.param(WIDEST_BRANCH, (4, 2, 2, 10), id="only-the-widest-branch-counts"),
-        pytest.param(TOP_LEVEL_UNION, (2, 1, 1, 4), id="a-union-on-the-root"),
-        pytest.param(SCALAR_UNION, (1, 1, 1, 3), id="anyof-of-two-scalars"),
-        pytest.param(NULLABLE, (1, 1, 0, 1), id="the-nullable-idiom-is-no-choice"),
-        pytest.param(ENUM_AND_TYPE_ARRAY, (2, 1, 0, 2), id="enum-and-type-arrays-are-no-choice"),
-        pytest.param(OPTIONAL_DEPTH, (1, 1, 0, 1), id="optional-nesting-and-unions-cost-nothing"),
-        pytest.param(ARRAY_OF_OBJECTS, (2, 2, 0, 4), id="an-array-of-objects-adds-a-level"),
-        pytest.param(REF_DEFS, (3, 2, 0, 5), id="ref-into-defs"),
-        pytest.param(REF_DEFINITIONS, (3, 2, 0, 5), id="ref-into-definitions"),
-        pytest.param(ONLY_OPTIONAL, (0, 1, 0, 0), id="no-required-parameter"),
-        pytest.param(ALL_OF, (4, 2, 0, 6), id="allof-branches-add-up"),
-        pytest.param(NOT_DEPTH, (1, 3, 0, 5), id="not-adds-depth-only"),
-        pytest.param(UNEQUAL_UNION, (4, 3, 1, 10), id="widest-branch-for-count-deepest-for-depth"),
-        pytest.param(SHARED_DEFINITION, (6, 2, 0, 8), id="a-definition-required-twice-counts-twice"),
-        pytest.param(REQUIRED_ONLY_BRANCHES, (2, 1, 1, 4), id="required-only-branches-use-the-parents-properties"),
-        pytest.param(RECURSIVE, (3, 2, 0, 5), id="a-recursive-reference-stops-at-the-repeat"),
-    ],
-)
-def test_invocation_cost(schema: dict, expected: tuple[int, int, int, int]) -> None:
+def test_invocation_cost() -> None:
     """requiredFieldCount + 2 x max(0, schemaDepth - 1) + 2 x unionChoiceCount, over the required subtree."""
-    signals = tds.context_signals(tool("t", schema=schema))
 
-    assert cost_signals(schema) == expected
-    assert signals["requiredFieldCount"] >= signals["requiredParamCount"]
+    def check_row(schema: dict, expected: tuple[int, int, int, int]) -> None:
+        signals = tds.context_signals(tool("t", schema=schema))
+
+        assert cost_signals(schema) == expected
+        assert signals["requiredFieldCount"] >= signals["requiredParamCount"]
+
+    rows = [
+        (FOUR_FLAT, (4, 1, 0, 4)),
+        (EIGHT_FLAT, (8, 1, 0, 8)),
+        (EIGHT_WRAPPED, (9, 2, 0, 11)),
+        (QUERY_PANEL, (5, 3, 2, 13)),
+        (WIDEST_BRANCH, (4, 2, 2, 10)),
+        (TOP_LEVEL_UNION, (2, 1, 1, 4)),
+        (SCALAR_UNION, (1, 1, 1, 3)),
+        (NULLABLE, (1, 1, 0, 1)),
+        (ENUM_AND_TYPE_ARRAY, (2, 1, 0, 2)),
+        (OPTIONAL_DEPTH, (1, 1, 0, 1)),
+        (ARRAY_OF_OBJECTS, (2, 2, 0, 4)),
+        (REF_DEFS, (3, 2, 0, 5)),
+        (REF_DEFINITIONS, (3, 2, 0, 5)),
+        (ONLY_OPTIONAL, (0, 1, 0, 0)),
+        (ALL_OF, (4, 2, 0, 6)),
+        (NOT_DEPTH, (1, 3, 0, 5)),
+        (UNEQUAL_UNION, (4, 3, 1, 10)),
+        (SHARED_DEFINITION, (6, 2, 0, 8)),
+        (REQUIRED_ONLY_BRANCHES, (2, 1, 1, 4)),
+        (RECURSIVE, (3, 2, 0, 5)),
+    ]
+    assert_table(rows, check_row, ids=['four-required-scalars-cost-4', 'eight-flat-cost-8', 'eight-wrapped-cost-11', 'the-13-example', 'only-the-widest-branch-counts', 'a-union-on-the-root', 'anyof-of-two-scalars', 'the-nullable-idiom-is-no-choice', 'enum-and-type-arrays-are-no-choice', 'optional-nesting-and-unions-cost-nothing', 'an-array-of-objects-adds-a-level', 'ref-into-defs', 'ref-into-definitions', 'no-required-parameter', 'allof-branches-add-up', 'not-adds-depth-only', 'widest-branch-for-count-deepest-for-depth', 'a-definition-required-twice-counts-twice', 'required-only-branches-use-the-parents-properties', 'a-recursive-reference-stops-at-the-repeat'])
 
 
-@pytest.mark.parametrize("schema", ["absent", None, {}, {"type": "object"}, {"type": "object", "properties": {}}, {"type": "object", "properties": {}, "required": []}])
-def test_an_absent_empty_or_property_less_schema_costs_nothing(schema: object) -> None:
-    definition: dict = {"name": "ping", "description": "Check the server answers."}
-    if schema != "absent":
-        definition["inputSchema"] = schema
+def test_an_absent_empty_or_property_less_schema_costs_nothing() -> None:
+    def check_row(schema: object) -> None:
+        definition: dict = {"name": "ping", "description": "Check the server answers."}
+        if schema != "absent":
+            definition["inputSchema"] = schema
 
-    signals = tds.context_signals(definition)
+        signals = tds.context_signals(definition)
 
-    assert (signals["requiredFieldCount"], signals["schemaDepth"], signals["unionChoiceCount"], signals["invocationCost"]) == (0, 0, 0, 0)
-    assert signals["paramCount"] == 0
-    assert signals["schemaDescriptionCoverage"] == 100
+        assert (signals["requiredFieldCount"], signals["schemaDepth"], signals["unionChoiceCount"], signals["invocationCost"]) == (0, 0, 0, 0)
+        assert signals["paramCount"] == 0
+        assert signals["schemaDescriptionCoverage"] == 100
+
+    rows = ((schema,) for schema in ["absent", None, {}, {"type": "object"}, {"type": "object", "properties": {}}, {"type": "object", "properties": {}, "required": []}])
+    assert_table(rows, check_row, ids=["absent", "None", "schema2", "schema3", "schema4", "schema5"])
 
 
 def test_depth_is_capped_at_ten() -> None:
@@ -787,21 +805,21 @@ def test_the_canonical_bytes_are_the_six_fields_as_sorted_compact_utf8_json() ->
     assert not re.search(r'[,:]\s', text.replace("Grüße senden.", "").replace("Wartezeit in µs.", ""))
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
+def test_each_definition_field_moves_the_hash() -> None:
+    def check_row(field: str, value: object) -> None:
+        changed = {**copy.deepcopy(HASHED), field: value}
+
+        assert tds.definition_hash(changed) != tds.definition_hash(HASHED)
+
+    rows = [
         ("name", "read_other_thing"),
         ("title", "Read another thing"),
         ("description", "Read a thing by its id, reworded."),
         ("inputSchema", scalars("key")),
         ("outputSchema", {"type": "object", "properties": {"value": {"type": "string"}}}),
         ("annotations", {"readOnlyHint": False}),
-    ],
-)
-def test_each_definition_field_moves_the_hash(field: str, value: object) -> None:
-    changed = {**copy.deepcopy(HASHED), field: value}
-
-    assert tds.definition_hash(changed) != tds.definition_hash(HASHED)
+    ]
+    assert_table(rows, check_row)
 
 
 def test_fields_outside_the_definition_do_not_move_the_hash() -> None:
@@ -939,26 +957,29 @@ def test_the_size_report_is_there_when_nothing_changed() -> None:
 # --- hard gates and post-processing (Stage 2, Stage 4) ------------------------
 
 
-@pytest.mark.parametrize("description", ["absent", None, "", "   \n\t "])
-def test_a_missing_description_is_scored_without_the_model(description: object) -> None:
-    definition = tool("ghost", description)
-    if description == "absent":
-        del definition["description"]
-    scorer = FakeScorer()
+def test_a_missing_description_is_scored_without_the_model() -> None:
+    def check_row(description: object) -> None:
+        definition = tool("ghost", description)
+        if description == "absent":
+            del definition["description"]
+        scorer = FakeScorer()
 
-    result = tds.evaluate_tool(definition, ["other_tool"], scorer)
+        result = tds.evaluate_tool(definition, ["other_tool"], scorer)
 
-    assert scorer.tool_calls == []
-    assert result["scores"] == dict.fromkeys(DIMENSIONS, 1)
-    assert set(result["justifications"]) == set(DIMENSIONS)
-    for dimension in DIMENSIONS:
-        assert result["justifications"][dimension]["score"] == 1
-        assert isinstance(result["justifications"][dimension]["justification"], str)
-        assert result["justifications"][dimension]["justification"].strip()
-    assert result["smells"] == list(DIMENSIONS)
-    assert result["tdqs"] == Fraction("1.0")
-    assert result["tier"] == "D"
-    assert result["flags"] == ["No Description"]
+        assert scorer.tool_calls == []
+        assert result["scores"] == dict.fromkeys(DIMENSIONS, 1)
+        assert set(result["justifications"]) == set(DIMENSIONS)
+        for dimension in DIMENSIONS:
+            assert result["justifications"][dimension]["score"] == 1
+            assert isinstance(result["justifications"][dimension]["justification"], str)
+            assert result["justifications"][dimension]["justification"].strip()
+        assert result["smells"] == list(DIMENSIONS)
+        assert result["tdqs"] == Fraction("1.0")
+        assert result["tier"] == "D"
+        assert result["flags"] == ["No Description"]
+
+    rows = ((description,) for description in ["absent", None, "", "   \n\t "])
+    assert_table(rows, check_row)
 
 
 def test_a_tautological_description_caps_purpose_clarity_at_two() -> None:
@@ -1101,10 +1122,12 @@ def test_an_answer_in_a_json_fence_parses() -> None:
     assert tds.parse_coherence_answer("```json\n" + json.dumps(GOOD_COHERENCE_ANSWER) + "\n```")["scores"]["disambiguation"]["score"] == 4
 
 
-@pytest.mark.parametrize("text", BAD_TOOL_ANSWERS)
-def test_a_bad_tool_answer_is_refused(text: str) -> None:
-    with pytest.raises(tds.InvalidAnswer):
-        tds.parse_tool_answer(text)
+def test_a_bad_tool_answer_is_refused() -> None:
+    def check_row(text: str) -> None:
+        with pytest.raises(tds.InvalidAnswer):
+            tds.parse_tool_answer(text)
+
+    assert_table(BAD_TOOL_ANSWERS, check_row)
 
 
 def risk(**fields: object) -> dict:
@@ -1144,10 +1167,12 @@ def test_a_good_coherence_answer_parses() -> None:
     assert parsed["shadowing_risks"] == []
 
 
-@pytest.mark.parametrize("text", BAD_COHERENCE_ANSWERS)
-def test_a_bad_coherence_answer_is_refused(text: str) -> None:
-    with pytest.raises(tds.InvalidAnswer):
-        tds.parse_coherence_answer(text)
+def test_a_bad_coherence_answer_is_refused() -> None:
+    def check_row(text: str) -> None:
+        with pytest.raises(tds.InvalidAnswer):
+            tds.parse_coherence_answer(text)
+
+    assert_table(BAD_COHERENCE_ANSWERS, check_row)
 
 
 def test_the_retry_count_is_two() -> None:
@@ -1236,13 +1261,14 @@ CONFIRMED_ENRICHED = {
 }
 
 
-@pytest.mark.parametrize(
-    ("cheap", "expensive", "candidate"),
-    [(0, 4, True), (0, 3, False), (10, 19, False), (10, 20, True), (2, 6, True), (3, 6, False), (4, 8, True), (4, 4, False)],
-)
-def test_is_shadow_candidate(cheap: int, expensive: int, candidate: bool) -> None:
+def test_is_shadow_candidate() -> None:
     """expensive >= 2 x cheap and expensive - cheap >= 4."""
-    assert tds.is_shadow_candidate(cheap, expensive) is candidate
+
+    def check_row(cheap: int, expensive: int, candidate: bool) -> None:
+        assert tds.is_shadow_candidate(cheap, expensive) is candidate
+
+    rows = [(0, 4, True), (0, 3, False), (10, 19, False), (10, 20, True), (2, 6, True), (3, 6, False), (4, 8, True), (4, 4, False)]
+    assert_table(rows, check_row)
 
 
 def test_the_prefilter_proposes_the_dearest_qualifying_sibling_once_per_tool() -> None:
@@ -1356,58 +1382,55 @@ def test_the_confirmation_procedure_is_the_versioned_one() -> None:
     assert tds.CONFIRMATION == CONFIRMATION_PROCEDURE
 
 
-@pytest.mark.parametrize(
-    ("pairs", "decision", "calls"),
-    [
-        pytest.param([("3.6", "3.7")], "pass", 1, id="an-improvement-passes-on-one-pair"),
-        pytest.param([("3.7", "3.7")], "pass", 1, id="a-tie-passes-on-one-pair"),
-        pytest.param([("3.7", "3.6")] * 5, "block", 3, id="a-drop-inside-tier-a-blocks-after-three-pairs"),
-        pytest.param([("3.2", "3.1")] * 5, "block", 3, id="a-drop-inside-tier-b-blocks"),
-        pytest.param([("3.7", "3.6"), ("3.6", "3.7"), ("3.6", "3.6")], "pass", 3, id="a-first-pair-drop-the-median-clears"),
-        pytest.param([("3.7", "3.6"), ("3.8", "3.7"), ("3.6", "3.6")], "block", 3, id="a-first-pair-drop-the-median-confirms"),
-        pytest.param([("3.9", "3.8"), ("3.0", "3.2"), ("3.1", "3.0")], "pass", 3, id="per-side-median-passes-where-two-pairs-drop"),
-        pytest.param([("3.8", "3.0"), ("3.0", "3.1"), ("3.6", "3.7")], "block", 3, id="per-side-median-blocks-where-two-pairs-rise"),
-    ],
-)
-def test_confirmation_procedure(pairs: list[tuple[str, str]], decision: str, calls: int) -> None:
+def test_confirmation_procedure() -> None:
     """One pair; on a drop exactly two more, then median head against median base, per side."""
-    runner = PairRunner(pairs)
 
-    result = tds.confirm(runner)
+    def check_row(pairs: list[tuple[str, str]], decision: str, calls: int) -> None:
+        runner = PairRunner(pairs)
 
-    assert result["decision"] == decision
-    assert runner.calls == calls
-    assert len(result["pairs"]) == calls
+        result = tds.confirm(runner)
+
+        assert result["decision"] == decision
+        assert runner.calls == calls
+        assert len(result["pairs"]) == calls
+
+    rows = [
+        ([('3.6', '3.7')], 'pass', 1),
+        ([('3.7', '3.7')], 'pass', 1),
+        ([('3.7', '3.6')] * 5, 'block', 3),
+        ([('3.2', '3.1')] * 5, 'block', 3),
+        ([('3.7', '3.6'), ('3.6', '3.7'), ('3.6', '3.6')], 'pass', 3),
+        ([('3.7', '3.6'), ('3.8', '3.7'), ('3.6', '3.6')], 'block', 3),
+        ([('3.9', '3.8'), ('3.0', '3.2'), ('3.1', '3.0')], 'pass', 3),
+        ([('3.8', '3.0'), ('3.0', '3.1'), ('3.6', '3.7')], 'block', 3),
+    ]
+    assert_table(rows, check_row, ids=['an-improvement-passes-on-one-pair', 'a-tie-passes-on-one-pair', 'a-drop-inside-tier-a-blocks-after-three-pairs', 'a-drop-inside-tier-b-blocks', 'a-first-pair-drop-the-median-clears', 'a-first-pair-drop-the-median-confirms', 'per-side-median-passes-where-two-pairs-drop', 'per-side-median-blocks-where-two-pairs-rise'])
 
 
-@pytest.mark.parametrize(
-    ("pairs", "decision", "calls"),
-    [
-        pytest.param([(("3.4", "3.7"), ("3.4", "3.5"))], "pass", 1, id="the-overall-falls-the-mean-holds-one-pair-passes"),
-        pytest.param([(("3.4", "3.5"), ("3.3", "3.7"))] * 3, "block", 3, id="the-overall-rises-the-mean-falls-and-blocks"),
-        pytest.param(
-            [(("3.4", "3.7"), ("3.3", "3.9")), (("3.4", "3.9"), ("3.4", "3.1")), (("3.4", "3.9"), ("3.5", "3.1"))],
-            "pass",
-            3,
-            id="the-medians-of-the-mean-clear-what-the-overall-would-block",
-        ),
-    ],
-)
-def test_the_mean_decides_not_the_overall(pairs: list[tuple[tuple[str, str], tuple[str, str]]], decision: str, calls: int) -> None:
+def test_the_mean_decides_not_the_overall() -> None:
     """Each side carries a mean TDQS and an overall that disagree: the mean triggers the
     confirmation pairs and its per-side medians decide."""
-    count = [0]
 
-    def run_pair() -> tuple[dict, dict]:
-        (base_mean, base_overall), (head_mean, head_overall) = pairs[count[0]]
-        count[0] += 1
-        return side(base_mean, base_overall), side(head_mean, head_overall)
+    def check_row(pairs: list[tuple[tuple[str, str], tuple[str, str]]], decision: str, calls: int) -> None:
+        count = [0]
 
-    result = tds.confirm(run_pair)
+        def run_pair() -> tuple[dict, dict]:
+            (base_mean, base_overall), (head_mean, head_overall) = pairs[count[0]]
+            count[0] += 1
+            return side(base_mean, base_overall), side(head_mean, head_overall)
 
-    assert result["decision"] == decision
-    assert count[0] == calls
-    assert tds.decide(result["pairs"]) == decision
+        result = tds.confirm(run_pair)
+
+        assert result["decision"] == decision
+        assert count[0] == calls
+        assert tds.decide(result["pairs"]) == decision
+
+    rows = [
+        ([(('3.4', '3.7'), ('3.4', '3.5'))], 'pass', 1),
+        ([(('3.4', '3.5'), ('3.3', '3.7'))] * 3, 'block', 3),
+        ([(('3.4', '3.7'), ('3.3', '3.9')), (('3.4', '3.9'), ('3.4', '3.1')), (('3.4', '3.9'), ('3.5', '3.1'))], 'pass', 3),
+    ]
+    assert_table(rows, check_row, ids=['the-overall-falls-the-mean-holds-one-pair-passes', 'the-overall-rises-the-mean-falls-and-blocks', 'the-medians-of-the-mean-clear-what-the-overall-would-block'])
 
 
 def test_an_invalid_pair_during_confirmation_never_passes() -> None:
@@ -1427,31 +1450,26 @@ ONE_BEFORE = [tool("alpha_tool", "Before.")]
 ONE_AFTER = [tool("alpha_tool", "After.")]
 
 
-@pytest.mark.parametrize(
-    ("base_values", "head_values", "decision", "recorded", "unused"),
-    [
-        pytest.param(
-            [4, 4, 4, 4], [3, 5, 3, 5], "block",
-            [("4.0", "3.0"), ("4.0", "5.0"), ("4.0", "3.0")], [5],
-            id="a-favourable-second-pair-then-a-blocking-median-and-an-unused-fourth",
-        ),
-        pytest.param([4, 4, 4], [3, 5, 4], "pass", [("4.0", "3.0"), ("4.0", "5.0"), ("4.0", "4.0")], [], id="the-median-clears-the-first-drop"),
-        pytest.param([5, 3, 4], [3, 4, 4], "pass", [("5.0", "3.0"), ("3.0", "4.0"), ("4.0", "4.0")], [], id="per-side-medians-not-per-pair-differences"),
-    ],
-)
-def test_noisy_scores_run_through_the_comparison(
-    base_values: list[int], head_values: list[int], decision: str, recorded: list[tuple[str, str]], unused: list[int]
-) -> None:
+def test_noisy_scores_run_through_the_comparison() -> None:
     """One tool per side: a tool scoring v in every dimension has a TDQS of v, and so a
     mean TDQS of v, which is what decides."""
-    scorer = QueueScorer({"Before.": base_values, "After.": head_values})
 
-    report = tds.compare(export(ONE_BEFORE), export(ONE_AFTER), scorer, standin_record())
+    def check_row(base_values: list[int], head_values: list[int], decision: str, recorded: list[tuple[str, str]], unused: list[int]) -> None:
+        scorer = QueueScorer({"Before.": base_values, "After.": head_values})
 
-    assert report["decision"] == decision
-    assert mean_pairs(report) == [(Fraction(base), Fraction(head)) for base, head in recorded]
-    assert scorer.queues["After."] == unused
-    assert scorer.queues["Before."] == base_values[3:]
+        report = tds.compare(export(ONE_BEFORE), export(ONE_AFTER), scorer, standin_record())
+
+        assert report["decision"] == decision
+        assert mean_pairs(report) == [(Fraction(base), Fraction(head)) for base, head in recorded]
+        assert scorer.queues["After."] == unused
+        assert scorer.queues["Before."] == base_values[3:]
+
+    rows = [
+        ([4, 4, 4, 4], [3, 5, 3, 5], 'block', [('4.0', '3.0'), ('4.0', '5.0'), ('4.0', '3.0')], [5]),
+        ([4, 4, 4], [3, 5, 4], 'pass', [('4.0', '3.0'), ('4.0', '5.0'), ('4.0', '4.0')], []),
+        ([5, 3, 4], [3, 4, 4], 'pass', [('5.0', '3.0'), ('3.0', '4.0'), ('4.0', '4.0')], []),
+    ]
+    assert_table(rows, check_row, ids=['a-favourable-second-pair-then-a-blocking-median-and-an-unused-fourth', 'the-median-clears-the-first-drop', 'per-side-medians-not-per-pair-differences'])
 
 
 # --- the comparison and its report --------------------------------------------
@@ -1820,19 +1838,23 @@ REPORT_MUTATIONS = [
 ]
 
 
-@pytest.mark.parametrize(("mutate", "error"), REPORT_MUTATIONS)
-def test_a_scored_report_that_does_not_hold_together_is_rejected(mutate: Callable[[dict], object], error: type[Exception]) -> None:
+def test_a_scored_report_that_does_not_hold_together_is_rejected() -> None:
     """Each mutation leaves the report's outer exports untouched, so only the scored
     content itself can give it away."""
-    report, base_export, head_export, record = scored_report()
-    tds.check_report(report, base_export, head_export, record)
-    mutated = copy.deepcopy(report)
-    mutate(mutated)
-    assert mutated["base"]["export"] == base_export
-    assert mutated["head"]["export"] == head_export
 
-    with pytest.raises(error):
-        tds.check_report(mutated, base_export, head_export, record)
+    def check_row(mutate: Callable[[dict], object], error: type[Exception]) -> None:
+        report, base_export, head_export, record = scored_report()
+        tds.check_report(report, base_export, head_export, record)
+        mutated = copy.deepcopy(report)
+        mutate(mutated)
+        assert mutated["base"]["export"] == base_export
+        assert mutated["head"]["export"] == head_export
+
+        with pytest.raises(error):
+            tds.check_report(mutated, base_export, head_export, record)
+
+    rows = REPORT_MUTATIONS
+    assert_table(rows, check_row)
 
 
 def test_a_scored_report_survives_its_own_json() -> None:
@@ -1867,31 +1889,31 @@ def test_the_committed_version_record_pins_model_spec_prompts_and_rubric() -> No
     assert record["confirmation"] == CONFIRMATION_PROCEDURE == tds.CONFIRMATION
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        pytest.param(lambda r: r.__setitem__("model", "another-model"), id="model"),
-        pytest.param(lambda r: r.__setitem__("cli_version", "9.9.9"), id="cli-version"),
-        pytest.param(lambda r: r.__setitem__("spec_commit", "f" * 40), id="spec-commit"),
-        pytest.param(lambda r: r.__setitem__("spec_version", "1.4"), id="spec-version"),
-        pytest.param(lambda r: r["prompt_sha256"].__setitem__("coherence_user", "0" * 64), id="a-prompt-hash"),
-        pytest.param(lambda r: r["dimension_weights"].__setitem__("purpose_clarity", 30), id="a-weight"),
-        pytest.param(lambda r: r["description_quality_weights"].__setitem__("mean", 61), id="a-description-quality-weight"),
-        pytest.param(lambda r: r["overall_weights"].__setitem__("coherence", 31), id="a-rollup-weight"),
-        pytest.param(lambda r: r["tier_thresholds"].__setitem__("A", 3.6), id="a-tier-threshold"),
-        pytest.param(lambda r: r.__setitem__("retries", 3), id="the-retry-count"),
-        pytest.param(lambda r: r["confirmation"].__setitem__("version", 2), id="the-confirmation-version"),
-        pytest.param(lambda r: r["confirmation"].__setitem__("confirmation_pairs_on_drop", 3), id="the-confirmation-pair-count"),
-    ],
-)
-def test_the_version_digest_moves_with_every_field(change: Callable[[dict], object]) -> None:
-    record = standin_record()
-    changed = copy.deepcopy(record)
-    change(changed)
+def test_the_version_digest_moves_with_every_field() -> None:
+    def check_row(change: Callable[[dict], object]) -> None:
+        record = standin_record()
+        changed = copy.deepcopy(record)
+        change(changed)
 
-    assert re.fullmatch(r"[0-9a-f]{64}", tds.version_digest(record))
-    assert tds.version_digest(reversed_keys(record)) == tds.version_digest(record)  # type: ignore[arg-type]
-    assert tds.version_digest(changed) != tds.version_digest(record)
+        assert re.fullmatch(r"[0-9a-f]{64}", tds.version_digest(record))
+        assert tds.version_digest(reversed_keys(record)) == tds.version_digest(record)  # type: ignore[arg-type]
+        assert tds.version_digest(changed) != tds.version_digest(record)
+
+    rows = ((change,) for change in [
+        lambda r: r.__setitem__("model", "another-model"),
+        lambda r: r.__setitem__("cli_version", "9.9.9"),
+        lambda r: r.__setitem__("spec_commit", "f" * 40),
+        lambda r: r.__setitem__("spec_version", "1.4"),
+        lambda r: r["prompt_sha256"].__setitem__("coherence_user", "0" * 64),
+        lambda r: r["dimension_weights"].__setitem__("purpose_clarity", 30),
+        lambda r: r["description_quality_weights"].__setitem__("mean", 61),
+        lambda r: r["overall_weights"].__setitem__("coherence", 31),
+        lambda r: r["tier_thresholds"].__setitem__("A", 3.6),
+        lambda r: r.__setitem__("retries", 3),
+        lambda r: r["confirmation"].__setitem__("version", 2),
+        lambda r: r["confirmation"].__setitem__("confirmation_pairs_on_drop", 3),
+    ])
+    assert_table(rows, check_row, ids=['model', 'cli-version', 'spec-commit', 'spec-version', 'a-prompt-hash', 'a-weight', 'a-description-quality-weight', 'a-rollup-weight', 'a-tier-threshold', 'the-retry-count', 'the-confirmation-version', 'the-confirmation-pair-count'])
 
 
 def per_dimension(values: tuple[int, ...]) -> dict:
@@ -2122,20 +2144,26 @@ def test_prompts_that_match_their_hashes_are_accepted() -> None:
     tds.verify_prompts(STANDIN_PROMPTS, STANDIN_HASHES)
 
 
-@pytest.mark.parametrize("key", sorted(PROMPT_KEYS))
-def test_each_changed_prompt_is_refused_and_named(key: str) -> None:
-    changed = {**STANDIN_PROMPTS, key: STANDIN_PROMPTS[key] + " "}
+def test_each_changed_prompt_is_refused_and_named() -> None:
+    def check_row(key: str) -> None:
+        changed = {**STANDIN_PROMPTS, key: STANDIN_PROMPTS[key] + " "}
 
-    with pytest.raises(tds.PromptMismatch, match=key):
-        tds.verify_prompts(changed, STANDIN_HASHES)
+        with pytest.raises(tds.PromptMismatch, match=key):
+            tds.verify_prompts(changed, STANDIN_HASHES)
+
+    rows = ((key,) for key in sorted(PROMPT_KEYS))
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("key", sorted(PROMPT_KEYS))
-def test_a_missing_prompt_or_a_missing_hash_is_refused_and_named(key: str) -> None:
-    with pytest.raises(tds.PromptMismatch, match=key):
-        tds.verify_prompts({name: text for name, text in STANDIN_PROMPTS.items() if name != key}, STANDIN_HASHES)
-    with pytest.raises(tds.PromptMismatch, match=key):
-        tds.verify_prompts(STANDIN_PROMPTS, {name: digest for name, digest in STANDIN_HASHES.items() if name != key})
+def test_a_missing_prompt_or_a_missing_hash_is_refused_and_named() -> None:
+    def check_row(key: str) -> None:
+        with pytest.raises(tds.PromptMismatch, match=key):
+            tds.verify_prompts({name: text for name, text in STANDIN_PROMPTS.items() if name != key}, STANDIN_HASHES)
+        with pytest.raises(tds.PromptMismatch, match=key):
+            tds.verify_prompts(STANDIN_PROMPTS, {name: digest for name, digest in STANDIN_HASHES.items() if name != key})
+
+    rows = ((key,) for key in sorted(PROMPT_KEYS))
+    assert_table(rows, check_row)
 
 
 def test_load_prompts_fetches_once_and_then_reads_the_cache(tmp_path: Path) -> None:
@@ -2293,13 +2321,16 @@ def test_the_tool_prompt_carries_the_full_definition_and_the_siblings() -> None:
     assert tds.render_tool_prompt(STANDIN_TOOL_USER, READ_THING, ["list_things", "ping"]) == READ_THING_PROMPT
 
 
-@pytest.mark.parametrize("title", ["absent", None, "   "])
-def test_the_tool_prompt_falls_back_where_a_field_is_missing(title: object) -> None:
-    definition: dict = {"name": "ping", "description": "Ping."}
-    if title != "absent":
-        definition["title"] = title
+def test_the_tool_prompt_falls_back_where_a_field_is_missing() -> None:
+    def check_row(title: object) -> None:
+        definition: dict = {"name": "ping", "description": "Ping."}
+        if title != "absent":
+            definition["title"] = title
 
-    assert tds.render_tool_prompt(STANDIN_TOOL_USER, definition, []) == BARE_PROMPT
+        assert tds.render_tool_prompt(STANDIN_TOOL_USER, definition, []) == BARE_PROMPT
+
+    rows = ((title,) for title in ["absent", None, "   "])
+    assert_table(rows, check_row)
 
 
 def test_the_output_schema_is_rendered_when_there_is_one() -> None:
@@ -2310,12 +2341,16 @@ def test_the_output_schema_is_rendered_when_there_is_one() -> None:
     assert '[output]\n{\n  "type": "object"\n}\n[annotations]' in rendered
 
 
-@pytest.mark.parametrize("token", ["invocationCost", "requiredFieldCount", "schemaDepth", "unionChoiceCount", "definitionBytes", "hasOutputSchema", "favouriteColour"])
-def test_a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused(token: str) -> None:
+def test_a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused() -> None:
     """The invocation-cost signals, definitionBytes and hasOutputSchema are withheld
     from the tool prompt; a template that asks for them is not the published one."""
-    with pytest.raises(tds.PromptMismatch, match=token):
-        tds.render_tool_prompt(STANDIN_TOOL_USER + f"\n{{{token}}}", READ_THING, [])
+
+    def check_row(token: str) -> None:
+        with pytest.raises(tds.PromptMismatch, match=token):
+            tds.render_tool_prompt(STANDIN_TOOL_USER + f"\n{{{token}}}", READ_THING, [])
+
+    rows = ((token,) for token in ["invocationCost", "requiredFieldCount", "schemaDepth", "unionChoiceCount", "definitionBytes", "hasOutputSchema", "favouriteColour"])
+    assert_table(rows, check_row)
 
 
 def test_the_coherence_prompt_lists_every_tool_with_its_cost_and_the_candidates() -> None:

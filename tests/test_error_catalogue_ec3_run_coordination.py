@@ -46,6 +46,7 @@ from pathlib import Path
 import pytest
 from conftest import write_authoritative_config, write_config
 from test_debug_sessions import debug_service, start_debug_session
+from test_mcp_result_text import assert_table
 from test_recover_tool import config_for
 from test_run_lifecycle import bench_workspace
 from test_test_reactor import (
@@ -1027,12 +1028,15 @@ def test_every_required_entry_has_a_spec() -> None:
     assert set(SAYS) == set(REQUIRED_KEYS)
 
 
-@pytest.mark.parametrize("key", REQUIRED_KEYS)
-def test_each_entry_says_what_the_code_does(key: str) -> None:
-    entry = catalogue_entry(key)
+def test_each_entry_says_what_the_code_does() -> None:
+    def check_row(key: str) -> None:
+        entry = catalogue_entry(key)
 
-    assert entry is not None, f"{key} has no catalogue entry"
-    assert spec_violations(key, entry) == []
+        assert entry is not None, f"{key} has no catalogue entry"
+        assert spec_violations(key, entry) == []
+
+    rows = ((key,) for key in REQUIRED_KEYS)
+    assert_table(rows, check_row)
 
 
 def test_a_spec_refuses_generic_or_wrong_advice() -> None:
@@ -1146,23 +1150,26 @@ def reference_service(tmp_path: Path):
         service.close()
 
 
-@pytest.mark.parametrize("key", REQUIRED_KEYS)
-def test_the_reference_resource_serves_each_entry(reference_service: AgenticHILToolService, key: str) -> None:
-    uri = ERROR_URI_PREFIX + key
-    response = handle_mcp_message({"jsonrpc": "2.0", "id": key, "method": "resources/read", "params": {"uri": uri}}, reference_service)
+def test_the_reference_resource_serves_each_entry(reference_service: AgenticHILToolService) -> None:
+    def check_row(key: str) -> None:
+        uri = ERROR_URI_PREFIX + key
+        response = handle_mcp_message({"jsonrpc": "2.0", "id": key, "method": "resources/read", "params": {"uri": uri}}, reference_service)
 
-    assert isinstance(response, dict)
-    assert "error" not in response, f"{uri} does not resolve: {response.get('error')}"
-    contents = response["result"]["contents"]
-    assert len(contents) == 1 and contents[0]["uri"] == uri
-    entry = json.loads(contents[0]["text"])
-    error_type, _, scope = key.partition(":")
-    assert entry["error_type"] == error_type
-    assert entry.get("scope", "") == scope
-    assert entry["meaning"].strip()
-    assert entry["remediation"] and entry["do_not"]
-    # The fields a refusal carries are the entry's own steps, not a second text.
-    assert remediation_fields(error_type, scope or None) == {"remediation": entry["remediation"], "do_not": entry["do_not"]}
+        assert isinstance(response, dict)
+        assert "error" not in response, f"{uri} does not resolve: {response.get('error')}"
+        contents = response["result"]["contents"]
+        assert len(contents) == 1 and contents[0]["uri"] == uri
+        entry = json.loads(contents[0]["text"])
+        error_type, _, scope = key.partition(":")
+        assert entry["error_type"] == error_type
+        assert entry.get("scope", "") == scope
+        assert entry["meaning"].strip()
+        assert entry["remediation"] and entry["do_not"]
+        # The fields a refusal carries are the entry's own steps, not a second text.
+        assert remediation_fields(error_type, scope or None) == {"remediation": entry["remediation"], "do_not": entry["do_not"]}
+
+    rows = ((key,) for key in REQUIRED_KEYS)
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------

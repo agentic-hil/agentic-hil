@@ -52,6 +52,7 @@ from test_config_write import changes, document_of
 from test_config_write import service as open_service
 from test_coordination import failing_write_record, restore_write_record
 from test_mcp_reference_resources import read_text
+from test_mcp_result_text import assert_table
 from test_read_until import close, tools_call
 from test_recover_tool import config_for, edit_config, ledger
 from test_server_upgrade import (
@@ -1104,9 +1105,12 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
 ]
 
 
-@pytest.mark.parametrize(("check", "text", "expected"), CONTROLS, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(CONTROLS)])
-def test_each_check_accepts_the_claim_and_rejects_its_inversion(check: Callable[[str], bool], text: str, expected: bool) -> None:
-    assert bool(check(text)) is expected, text
+def test_each_check_accepts_the_claim_and_rejects_its_inversion() -> None:
+    def check_row(check: Callable[[str], bool], text: str, expected: bool) -> None:
+        assert bool(check(text)) is expected, text
+
+    rows = CONTROLS
+    assert_table(rows, check_row, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(CONTROLS)])
 
 
 # A set definition inside the budget that keeps every keyword and inverts two
@@ -1144,12 +1148,15 @@ def test_the_six_tools_are_listed_with_descriptions_within_the_budget(listed: di
     assert not properties_over, properties_over
 
 
-@pytest.mark.parametrize("name", TD6_TOOLS)
-def test_every_input_property_is_the_expected_one_and_describes_itself(listed: dict[str, dict], name: str) -> None:
-    found = dict(input_properties(listed[name]["inputSchema"]))
-    assert set(found) == PROPERTIES[name], sorted(found)
-    undescribed = sorted(path for path, schema in found.items() if not str(schema.get("description") or "").strip())
-    assert not undescribed, undescribed
+def test_every_input_property_is_the_expected_one_and_describes_itself(listed: dict[str, dict]) -> None:
+    def check_row(name: str) -> None:
+        found = dict(input_properties(listed[name]["inputSchema"]))
+        assert set(found) == PROPERTIES[name], sorted(found)
+        undescribed = sorted(path for path, schema in found.items() if not str(schema.get("description") or "").strip())
+        assert not undescribed, undescribed
+
+    rows = ((name,) for name in TD6_TOOLS)
+    assert_table(rows, check_row)
 
 
 @pytest.mark.parametrize("name", [DESCRIBE, RELOAD, UPGRADE])
@@ -1327,17 +1334,19 @@ CATALOGUE_CLAIMS: list[tuple[str, str, Callable[[str], bool]]] = [
 ]
 
 
-@pytest.mark.parametrize(("error_type", "field", "check"), CATALOGUE_CLAIMS, ids=[f"{error_type}-{field}" for error_type, field, _ in CATALOGUE_CLAIMS])
-def test_the_catalogue_says_what_the_definitions_leave_to_it(tmp_path: Path, error_type: str, field: str, check: Callable[[str], bool]) -> None:
-    # The entry `resources/read` serves for `error_type`, the one a refusal's
-    # catalogue link resolves to.
-    service = new_service(tmp_path / "catalogue")
-    try:
-        value = json.loads(read_text(service, ERROR_URI_PREFIX + error_type))[field]
-    finally:
-        close(service)
-    text = " ".join(value) if isinstance(value, list) else str(value)
-    assert check(text), (error_type, field, text)
+def test_the_catalogue_says_what_the_definitions_leave_to_it(tmp_path_factory: pytest.TempPathFactory) -> None:
+    def check_row(error_type: str, field: str, check: Callable[[str], bool]) -> None:
+        tmp_path = tmp_path_factory.mktemp("row")
+        service = new_service(tmp_path / "catalogue")
+        try:
+            value = json.loads(read_text(service, ERROR_URI_PREFIX + error_type))[field]
+        finally:
+            close(service)
+        text = " ".join(value) if isinstance(value, list) else str(value)
+        assert check(text), (error_type, field, text)
+
+    rows = CATALOGUE_CLAIMS
+    assert_table(rows, check_row, ids=[f"{error_type}-{field}" for error_type, field, _ in CATALOGUE_CLAIMS])
 
 
 # ---------------------------------------------------------------------------

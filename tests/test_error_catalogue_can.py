@@ -95,6 +95,7 @@ from test_can_broker_deadline import PARTICIPANT as DEADLINE_PARTICIPANT
 from test_can_broker_deadline import FakeClock, ScriptedBroker, prepared_bus
 from test_can_likely_causes import RefusingCloseAdapter, call_site_strings, process_bridge_session_classes
 from test_can_participant_sessions import SharedFakeParticipant
+from test_mcp_result_text import assert_table
 
 import agentic_hil.bridge as bridge_module_under_test
 import agentic_hil.can as can_module_under_test
@@ -759,33 +760,39 @@ def served_entry(key: str) -> dict:
     return json.loads(contents[0]["text"])
 
 
-@pytest.mark.parametrize("error_type", REQUIRED)
-def test_the_entry_resolves_at_its_reference_uri(reference: AgenticHILToolService, error_type: str) -> None:
-    assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
+def test_the_entry_resolves_at_its_reference_uri(reference: AgenticHILToolService) -> None:
+    def check_row(error_type: str) -> None:
+        assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
 
-    served = read_reference(reference, ERROR_URI_PREFIX + error_type)
+        served = read_reference(reference, ERROR_URI_PREFIX + error_type)
 
-    assert served == catalogue_entry(error_type), served
-    assert served["meaning"].strip(), served
-    assert served["remediation"] and all(step.strip() for step in served["remediation"]), served
-    assert served.get("do_not") and all(step.strip() for step in served["do_not"]), served
+        assert served == catalogue_entry(error_type), served
+        assert served["meaning"].strip(), served
+        assert served["remediation"] and all(step.strip() for step in served["remediation"]), served
+        assert served.get("do_not") and all(step.strip() for step in served["do_not"]), served
+
+    rows = ((error_type,) for error_type in REQUIRED)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("error_type", REQUIRED)
-def test_remediation_fields_hand_a_refusal_the_entry(error_type: str) -> None:
-    assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
-    entry = catalogue_entry(error_type)
-    assert entry is not None
+def test_remediation_fields_hand_a_refusal_the_entry() -> None:
+    def check_row(error_type: str) -> None:
+        assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
+        entry = catalogue_entry(error_type)
+        assert entry is not None
 
-    fields = remediation_fields(error_type)
+        fields = remediation_fields(error_type)
 
-    if error_type == "permission_denied":
-        # The one entry written around the key a refusal is about: without that
-        # key the fields are empty by design (`_needs_a_permission_key`, #443).
-        fields = remediation_fields(error_type, permission="permissions.allow_write")
-        assert fields["remediation"] and fields["do_not"], fields
-        return
-    assert fields == {"remediation": entry["remediation"], "do_not": entry["do_not"]}, fields
+        if error_type == "permission_denied":
+            # The one entry written around the key a refusal is about: without that
+            # key the fields are empty by design (`_needs_a_permission_key`, #443).
+            fields = remediation_fields(error_type, permission="permissions.allow_write")
+            assert fields["remediation"] and fields["do_not"], fields
+            return
+        assert fields == {"remediation": entry["remediation"], "do_not": entry["do_not"]}, fields
+
+    rows = ((error_type,) for error_type in REQUIRED)
+    assert_table(rows, check_row)
 
 
 def assert_carries_its_entry(result: dict, error_type: str, scope: str | None = None) -> None:
@@ -1081,13 +1088,16 @@ def content_problems(error_type: str, remedy: ErrorRemedy) -> list[str]:
     return problems
 
 
-@pytest.mark.parametrize("error_type", sorted(NEW_ENTRIES))
-def test_every_new_entry_says_what_its_refusal_means(error_type: str) -> None:
-    assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
+def test_every_new_entry_says_what_its_refusal_means() -> None:
+    def check_row(error_type: str) -> None:
+        assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
 
-    problems = content_problems(error_type, ERROR_CATALOGUE[error_type])
+        problems = content_problems(error_type, ERROR_CATALOGUE[error_type])
 
-    assert not problems, f"{error_type}:\n" + "\n".join(f"  {problem}" for problem in problems)
+        assert not problems, f"{error_type}:\n" + "\n".join(f"  {problem}" for problem in problems)
+
+    rows = ((error_type,) for error_type in sorted(NEW_ENTRIES))
+    assert_table(rows, check_row)
 
 
 def test_every_new_entry_has_a_specification_of_its_own() -> None:
@@ -1104,9 +1114,12 @@ GENERIC = ErrorRemedy(
 )
 
 
-@pytest.mark.parametrize("error_type", sorted(NEW_ENTRIES))
-def test_advice_that_fits_any_refusal_fits_none(error_type: str) -> None:
-    assert content_problems(error_type, GENERIC), f"the generic entry passes as {error_type}"
+def test_advice_that_fits_any_refusal_fits_none() -> None:
+    def check_row(error_type: str) -> None:
+        assert content_problems(error_type, GENERIC), f"the generic entry passes as {error_type}"
+
+    rows = ((error_type,) for error_type in sorted(NEW_ENTRIES))
+    assert_table(rows, check_row)
 
 
 VALID_CLOSE_FAILED = ErrorRemedy(
@@ -1137,16 +1150,20 @@ def with_step(remedy: ErrorRemedy, step: str) -> ErrorRemedy:
     return ErrorRemedy(meaning=remedy.meaning, remediation=(*remedy.remediation, step), do_not=remedy.do_not)
 
 
-@pytest.mark.parametrize(("error_type", "valid", "wrong"), [("can_adapter_close_failed", VALID_CLOSE_FAILED, RETRY_PROMISE), ("can_send_failed", VALID_SEND_FAILED, RESEND_PROMISE)])
-def test_an_entry_that_makes_the_forbidden_claim_fails_on_that_claim_alone(error_type: str, valid: ErrorRemedy, wrong: str) -> None:
+def test_an_entry_that_makes_the_forbidden_claim_fails_on_that_claim_alone() -> None:
     """The specification accepts an entry that states the relations, and
     rejects the same entry once it also makes the claim the code disproves,
     for that claim and nothing else."""
-    assert content_problems(error_type, valid) == []
 
-    problems = content_problems(error_type, with_step(valid, wrong))
+    def check_row(error_type: str, valid: ErrorRemedy, wrong: str) -> None:
+        assert content_problems(error_type, valid) == []
 
-    assert problems and all(problem.startswith("never:") for problem in problems), problems
+        problems = content_problems(error_type, with_step(valid, wrong))
+
+        assert problems and all(problem.startswith("never:") for problem in problems), problems
+
+    rows = [("can_adapter_close_failed", VALID_CLOSE_FAILED, RETRY_PROMISE), ("can_send_failed", VALID_SEND_FAILED, RESEND_PROMISE)]
+    assert_table(rows, check_row)
 
 
 def test_no_two_new_entries_give_the_same_advice() -> None:
@@ -1176,23 +1193,27 @@ PACKAGE_SOURCE = "\n".join(
 NAMED_THING = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 
 
-@pytest.mark.parametrize("error_type", sorted(NEW_ENTRIES))
-def test_every_new_step_names_something_the_code_has(error_type: str) -> None:
+def test_every_new_step_names_something_the_code_has() -> None:
     """Each step names a tool, a field or a config key in backticks, and every
     such name is one the package spells, so a step cannot send the reader to a
     tool that does not exist. Over the new entries only: three existing CAN
     entries have a step that names nothing in backticks, and rewriting them is
     not this change."""
-    assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
-    remedy = ERROR_CATALOGUE[error_type]
 
-    for step in remedy.remediation:
-        spans = re.findall(r"`([^`]+)`", step)
-        assert spans, f"{error_type}: this step names no tool, field or config key: {step!r}"
-        for span in spans:
-            for token in re.split(r"[.\s]+", span):
-                if NAMED_THING.fullmatch(token):
-                    assert token in PACKAGE_SOURCE, f"{error_type}: `{token}` is named by no code in the package: {step!r}"
+    def check_row(error_type: str) -> None:
+        assert error_type in ERROR_CATALOGUE, f"no catalogue entry for {error_type}"
+        remedy = ERROR_CATALOGUE[error_type]
+
+        for step in remedy.remediation:
+            spans = re.findall(r"`([^`]+)`", step)
+            assert spans, f"{error_type}: this step names no tool, field or config key: {step!r}"
+            for span in spans:
+                for token in re.split(r"[.\s]+", span):
+                    if NAMED_THING.fullmatch(token):
+                        assert token in PACKAGE_SOURCE, f"{error_type}: `{token}` is named by no code in the package: {step!r}"
+
+    rows = ((error_type,) for error_type in sorted(NEW_ENTRIES))
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------

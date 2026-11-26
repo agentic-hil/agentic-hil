@@ -114,9 +114,10 @@ UNEXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptn
 # stop arrives as the continue's own asynchronous stop, ASYNC_STOP_DELAY_S
 # (20 ms) after it, and the attach stop straight after `^done`. On the bench the
 # SIGINT fault stop followed a continue that timed out and the product's
-# `-exec-interrupt --all` (tests/bench/test_bench_faults.py). No fault recorded
-# over arm-none-eabi-gdb exists. The file is read on first use and not at
-# import, so a copy of this fake planted without it still starts.
+# `-exec-interrupt --all` (tests/bench/test_bench_faults.py).
+# HardFault stops recorded over arm-none-eabi-gdb are in
+# gdb_mi_stop_recordings_arm_none_eabi.json. This fake answers from the Debian
+# recording, which it reads on first use, so a copy planted without it still starts.
 GDB_MI_STOP_RECORDING = Path(__file__).with_name("gdb_mi_stop_recordings.json")
 gdb_mi_stop_recordings: list[dict] | None = None
 # The stop records the public `stop_reason` vocabulary maps and the suite had

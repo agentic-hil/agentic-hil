@@ -52,6 +52,7 @@ import pytest
 from conftest import FAKE_OPENOCD
 from support import scaled_time_bound
 from test_devices import config_for, mcp_call
+from test_mcp_result_text import assert_table
 from test_reactor_mcp_tools import RESET_PLAN, bound_service
 from test_run_lifecycle import bench_workspace
 from test_tool_definition_can import (
@@ -691,29 +692,36 @@ RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
 ]
 
 
-@pytest.mark.parametrize(("check", "true_statement", "inverted"), RELATIONS, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(RELATIONS)])
-def test_each_relation_check_refuses_its_inverted_statement(check: Callable[[str], bool], true_statement: str, inverted: str) -> None:
-    assert check(true_statement), true_statement
-    assert not check(inverted), inverted
+def test_each_relation_check_refuses_its_inverted_statement() -> None:
+    def check_row(check: Callable[[str], bool], true_statement: str, inverted: str) -> None:
+        assert check(true_statement), true_statement
+        assert not check(inverted), inverted
+
+    rows = RELATIONS
+    assert_table(rows, check_row, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(RELATIONS)])
 
 
 # ---------------------------------------------------------------------------
 # What every definition owes, whatever tool it is.
 
 
-@pytest.mark.parametrize("tool_name", TOOLS)
-def test_every_input_at_any_depth_carries_its_own_description_within_the_limits(listed: dict[str, dict], tool_name: str) -> None:
+def test_every_input_at_any_depth_carries_its_own_description_within_the_limits(listed: dict[str, dict]) -> None:
     """A property inside an array's items is an input a host shows like any
     other, so the selector's `kind`, `id` and `participant` owe a description as
     much as `devices` does."""
-    tool = listed[tool_name]
-    found = dict(every_property(tool["inputSchema"]))
 
-    undescribed = sorted(path for path, schema in found.items() if not str(schema.get("description", "")).strip())
-    assert undescribed == [], f"{tool_name}: {undescribed}"
-    over = {path: len(schema["description"]) for path, schema in found.items() if len(schema["description"]) > PROPERTY_DESCRIPTION_LIMIT}
-    assert over == {}, over
-    assert len(tool["description"]) <= DESCRIPTION_LIMIT, len(tool["description"])
+    def check_row(tool_name: str) -> None:
+        tool = listed[tool_name]
+        found = dict(every_property(tool["inputSchema"]))
+
+        undescribed = sorted(path for path, schema in found.items() if not str(schema.get("description", "")).strip())
+        assert undescribed == [], f"{tool_name}: {undescribed}"
+        over = {path: len(schema["description"]) for path, schema in found.items() if len(schema["description"]) > PROPERTY_DESCRIPTION_LIMIT}
+        assert over == {}, over
+        assert len(tool["description"]) <= DESCRIPTION_LIMIT, len(tool["description"])
+
+    rows = ((tool_name,) for tool_name in TOOLS)
+    assert_table(rows, check_row)
 
 
 def test_the_walk_reaches_the_selector_fields(listed: dict[str, dict]) -> None:
@@ -722,10 +730,13 @@ def test_the_walk_reaches_the_selector_fields(listed: dict[str, dict]) -> None:
     assert found == {"/devices", "/devices/items/kind", "/devices/items/id", "/devices/items/participant", "/label", "/wait_s"}, found
 
 
-@pytest.mark.parametrize("tool_name", TOOLS)
-def test_describing_an_input_leaves_what_a_call_may_pass_unchanged(listed: dict[str, dict], tool_name: str) -> None:
-    assert what_a_call_may_pass(listed[tool_name]["inputSchema"]) == SCHEMAS[tool_name]
-    assert "outputSchema" not in listed[tool_name]
+def test_describing_an_input_leaves_what_a_call_may_pass_unchanged(listed: dict[str, dict]) -> None:
+    def check_row(tool_name: str) -> None:
+        assert what_a_call_may_pass(listed[tool_name]["inputSchema"]) == SCHEMAS[tool_name]
+        assert "outputSchema" not in listed[tool_name]
+
+    rows = ((tool_name,) for tool_name in TOOLS)
+    assert_table(rows, check_row)
 
 
 def test_annotation_keywords_are_left_out_only_where_they_stand_as_keywords() -> None:
@@ -747,13 +758,16 @@ def test_every_documented_default_is_the_one_the_code_applies(listed: dict[str, 
         assert (isinstance(value, bool), value) == (isinstance(expected, bool), expected), (key, value)
 
 
-@pytest.mark.parametrize("tool_name", TOOLS)
-def test_the_annotations_stay_and_the_text_does_not_contradict_them(listed: dict[str, dict], tool_name: str) -> None:
-    tool = listed[tool_name]
+def test_the_annotations_stay_and_the_text_does_not_contradict_them(listed: dict[str, dict]) -> None:
+    def check_row(tool_name: str) -> None:
+        tool = listed[tool_name]
 
-    assert tool["annotations"] == ANNOTATIONS[tool_name], tool["annotations"]
-    if tool_name not in READ_ONLY:
-        assert not names(r"\bread-only\b|\b(changes|writes|touches) nothing\b", tool["description"]), tool["description"]
+        assert tool["annotations"] == ANNOTATIONS[tool_name], tool["annotations"]
+        if tool_name not in READ_ONLY:
+            assert not names(r"\bread-only\b|\b(changes|writes|touches) nothing\b", tool["description"]), tool["description"]
+
+    rows = ((tool_name,) for tool_name in TOOLS)
+    assert_table(rows, check_row)
 
 
 def test_every_identifier_a_definition_names_is_a_listed_tool_or_a_value_the_code_spells(listed: dict[str, dict]) -> None:
@@ -768,14 +782,18 @@ def test_every_identifier_a_definition_names_is_a_listed_tool_or_a_value_the_cod
         assert unknown == [], (tool_name, unknown)
 
 
-@pytest.mark.parametrize("tool_name", TOOLS)
-def test_no_definition_speaks_in_command_line_flags(listed: dict[str, dict], tool_name: str) -> None:
+def test_no_definition_speaks_in_command_line_flags(listed: dict[str, dict]) -> None:
     """An MCP caller passes arguments, not flags: a `--run` or `--detach` names
     something no tool takes (runlifecycle.py:1112 says it in a summary, which is
     reported, not repeated)."""
-    text = definition(listed[tool_name])
 
-    assert not re.search(r"(?<![\w-])--[a-z]", text), text
+    def check_row(tool_name: str) -> None:
+        text = definition(listed[tool_name])
+
+        assert not re.search(r"(?<![\w-])--[a-z]", text), text
+
+    rows = ((tool_name,) for tool_name in TOOLS)
+    assert_table(rows, check_row)
 
 
 # Every refusal a tool answers that a caller can act on, by the branch that
@@ -818,11 +836,14 @@ REFUSALS: dict[str, tuple[str, ...]] = {
 }
 
 
-@pytest.mark.parametrize(("tool_name", "error_type"), [(tool_name, code) for tool_name, codes in REFUSALS.items() for code in codes])
-def test_every_refusal_a_tool_answers_is_named_in_its_definition(listed: dict[str, dict], tool_name: str, error_type: str) -> None:
-    text = definition(listed[tool_name])
+def test_every_refusal_a_tool_answers_is_named_in_its_definition(listed: dict[str, dict]) -> None:
+    def check_row(tool_name: str, error_type: str) -> None:
+        text = definition(listed[tool_name])
 
-    assert names(rf"\b{error_type}\b", text), (error_type, text)
+        assert names(rf"\b{error_type}\b", text), (error_type, text)
+
+    rows = [(tool_name, code) for tool_name, codes in REFUSALS.items() for code in codes]
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -1001,13 +1022,16 @@ def test_detach_names_its_default_and_what_each_value_answers(listed: dict[str, 
 # test_reactor_status and test_reactor_stop: the handle, the states, the stop.
 
 
-@pytest.mark.parametrize("tool_name", [PLAN_STATUS, PLAN_STOP])
-def test_run_says_what_a_handle_is_and_where_it_comes_from(listed: dict[str, dict], tool_name: str) -> None:
-    text = property_text(listed[tool_name], "run")
+def test_run_says_what_a_handle_is_and_where_it_comes_from(listed: dict[str, dict]) -> None:
+    def check_row(tool_name: str) -> None:
+        text = property_text(listed[tool_name], "run")
 
-    assert RUN_HANDLE_PATTERN.pattern == r"^run-[0-9a-f]{16}$"
-    assert handle_shape_named(text), text
-    assert PLAN_RUN in text, text
+        assert RUN_HANDLE_PATTERN.pattern == r"^run-[0-9a-f]{16}$"
+        assert handle_shape_named(text), text
+        assert PLAN_RUN in text, text
+
+    rows = ((tool_name,) for tool_name in [PLAN_STATUS, PLAN_STOP])
+    assert_table(rows, check_row)
 
 
 def test_test_reactor_status_names_the_states_a_run_passes_through(listed: dict[str, dict]) -> None:

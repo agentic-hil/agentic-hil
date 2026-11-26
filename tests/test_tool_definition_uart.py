@@ -34,6 +34,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import write_config
 from support import scaled_time_bound
+from test_mcp_result_text import assert_table
 from test_read_until import DIE, ScriptedSerialHandle, close, tools_call
 
 import agentic_hil
@@ -1313,10 +1314,13 @@ READ_RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
 ]
 
 
-@pytest.mark.parametrize(("check", "true_statement", "inverted"), READ_RELATIONS, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(READ_RELATIONS)])
-def test_each_com_read_relation_check_refuses_its_inverted_statement(check: Callable[[str], bool], true_statement: str, inverted: str) -> None:
-    assert check(true_statement), true_statement
-    assert not check(inverted), inverted
+def test_each_com_read_relation_check_refuses_its_inverted_statement() -> None:
+    def check_row(check: Callable[[str], bool], true_statement: str, inverted: str) -> None:
+        assert check(true_statement), true_statement
+        assert not check(inverted), inverted
+
+    rows = READ_RELATIONS
+    assert_table(rows, check_row, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(READ_RELATIONS)])
 
 
 def test_com_read_is_listed_and_every_input_describes_itself_within_the_budget(listed: dict[str, dict]) -> None:
