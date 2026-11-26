@@ -1,0 +1,40 @@
+# Build the images as tests/bench/firmware/h533re_under_reset.c says and put them into build/hil/
+# under the plan's workspace root.
+# The second flash is the first one after a previous image that runs from flash with its watchdog
+# started. With connect_mode: under_reset on the debugger entry every step passes. With hotplug that
+# flash ends in "failed to download  Sector[0]", and the plan ends red at that step.
+version: 5
+name: NUCLEO-H533RE first flash after a watchdog image
+steps:
+  - action: flash
+    debugger: stlink_v3_b
+    image_path: build/hil/h533re_under_reset_previous_iwdg.elf
+    reset_after_flash: false
+  - action: uart_open
+    port_id: stlink_v3_b_vcp
+    clear_buffer: true
+  - action: reset
+    debugger: stlink_v3_b
+    mode: run
+  - action: uart_expect
+    port_id: stlink_v3_b_vcp
+    pattern: "ahil752 image=previous-iwdg boot_rsr=[0-9a-f]{8} live_rsr=00000000 watchdog=on"
+    timeout_s: 10
+  - action: flash
+    debugger: stlink_v3_b
+    image_path: build/hil/h533re_under_reset_next.elf
+    reset_after_flash: false
+  - action: read_symbol
+    debugger: stlink_v3_b
+    symbol: rcc_rsr
+    size_bytes: 4
+    comparator: {equals: 0x04000000}
+  - action: reset
+    debugger: stlink_v3_b
+    mode: run
+  - action: uart_expect
+    port_id: stlink_v3_b_vcp
+    pattern: "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off"
+    timeout_s: 10
+  - action: uart_close
+    port_id: stlink_v3_b_vcp

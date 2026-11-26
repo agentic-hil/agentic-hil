@@ -72,6 +72,8 @@ exclude tests/test_bench_esp32_images.py
 # The HardFault plan test reads checkout-only bench files and imports the
 # repository's version check from tools/.
 exclude tests/test_f446re_hardfault_plan.py
+# The H533RE recording test reads checkout-only plans and firmware sources.
+exclude tests/test_h533re_under_reset_recordings.py
 # The container test of the install eval's startup arm imports the verifier out
 # of evals/, which never ships, so it cannot collect from a distribution either.
 exclude tests/container/test_protocol_startup_refusal.py

@@ -1,0 +1,39 @@
+# Build the images as tests/bench/firmware/h533re_under_reset.c says and put them into build/hil/
+# under the plan's workspace root.
+# The control for connect_mode: hotplug. The previous image runs from flash under a 1 kHz interrupt and
+# starts no watchdog. Hot plug programs over it and leaves the reset flags clear: no reset happened.
+version: 5
+name: NUCLEO-H533RE hot-plug control
+steps:
+  - action: flash
+    debugger: stlink_v3_b
+    image_path: build/hil/h533re_under_reset_previous_systick.elf
+    reset_after_flash: false
+  - action: uart_open
+    port_id: stlink_v3_b_vcp
+    clear_buffer: true
+  - action: reset
+    debugger: stlink_v3_b
+    mode: run
+  - action: uart_expect
+    port_id: stlink_v3_b_vcp
+    pattern: "ahil752 image=previous-systick boot_rsr=[0-9a-f]{8} live_rsr=00000000 watchdog=off"
+    timeout_s: 10
+  - action: flash
+    debugger: stlink_v3_b
+    image_path: build/hil/h533re_under_reset_next.elf
+    reset_after_flash: false
+  - action: read_symbol
+    debugger: stlink_v3_b
+    symbol: rcc_rsr
+    size_bytes: 4
+    comparator: {equals: 0}
+  - action: reset
+    debugger: stlink_v3_b
+    mode: run
+  - action: uart_expect
+    port_id: stlink_v3_b_vcp
+    pattern: "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off"
+    timeout_s: 10
+  - action: uart_close
+    port_id: stlink_v3_b_vcp

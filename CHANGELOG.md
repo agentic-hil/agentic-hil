@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Record NUCLEO-H533RE first flashes with a running watchdog: hot plug failed in all six jobs, and under reset programmed and verified in all five comparable jobs. Document the NRST evidence for that board. (#752)
+
 ### Fixed
 
 - Keep device holds visible in the bench server's HTTP and MCP reads from job dispatch until the scheduler records the end, including for jobs on shared CAN buses. (#937)

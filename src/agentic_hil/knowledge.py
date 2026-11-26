@@ -4637,7 +4637,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "to `under_reset` (STM32CubeProgrammer's `mode=UR`) through `project_config_set` under "
             "`allow_config_description_write`. This requires the probe's reset line wired to the target's NRST. "
             "Apply the setting with `project_config_reload_description` or a server restart. "
-            "`under_reset` was measured for the erase refusal. `under_reset` was not measured for this H533 download failure.",
+            "`under_reset` was measured for the erase refusal. `under_reset` was not measured for this H533 download failure. "
+            "On a NUCLEO-H533RE running the watchdog reproducer, the first flash failed under hot plug in 6 of 6 jobs. "
+            "With the same plan and images, the first flash programmed and verified under `under_reset` in 5 of 5 jobs. "
+            "Only `flash_firmware` reads `connect_mode`. The recorded reset steps connected in `NORMAL` mode, "
+            "and the memory reads used `HOTPLUG` without issuing a reset. "
+            "`RCC_RSR` read immediately after those flashes showed `PINRSTF` alone (`0x04000000`), confirming that "
+            "the on-board ST-LINK drove NRST on that board. These results cover one board, one ST-LINK firmware "
+            "and one STM32CubeProgrammer version. The firmware running before the original H533 download failure "
+            "is unknown and the cause of that failure is not established.",
             "If the image fits and the flash fails the same way once more, look past the two recorded causes as well "
             "as at them: a hot-plug failure may simply have happened twice, and one recorded success on the next "
             "attempt does not rule that out. Ask the device what it refuses rather than guessing: read the option "
