@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from parameter_rows import check_parameter_rows, parameter_rows
 from test_agent_provisioning import attached_hardware, written_document
 from test_agent_provisioning import bench as provisioning_bench
 from test_can_listen_only import PCAN_PARAMETER_OFF, can_config, fake_can_module, fake_pcan_bus, install_pcan_basic
@@ -209,12 +210,15 @@ ROUTES: dict[str, tuple[str, ...]] = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(ROUTES))
-def test_a_shortened_description_still_says_what_it_stands_in_for(name: str) -> None:
-    text = description_of(name)
+def test_a_shortened_description_still_says_what_it_stands_in_for(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, name: str) -> None:
+        text = description_of(name)
 
-    missing = [pattern for pattern in ROUTES[name] if not re.search(pattern, text)]
-    assert missing == [], text
+        missing = [pattern for pattern in ROUTES[name] if not re.search(pattern, text)]
+        assert missing == [], text
+
+    rows = parameter_rows(sorted(ROUTES))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------

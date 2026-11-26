@@ -40,6 +40,7 @@ from typing import NoReturn
 
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config
+from parameter_rows import check_parameter_rows, combine_parameter_rows, parameter_rows
 from support import trusted_launcher
 
 from agentic_hil import __version__, cli, upgrade
@@ -159,48 +160,53 @@ def _bundled_test_schema() -> dict:
     return json.loads(resources.files("agentic_hil").joinpath("schemas", "testconfig.schema.json").read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize(
-    ("command", "expected"),
-    [
-        ("schema", lambda: json.loads(config_schema_text())),
-        ("test-schema", _bundled_test_schema),
-        ("mcp-config", lambda: json.loads(cli.mcp_config_text())),
-    ],
-)
-@pytest.mark.parametrize("json_flag", [[], ["--json"]], ids=["rendered", "json"])
-def test_schema_printed_to_stdout_is_exactly_the_schema(
-    monkeypatch: pytest.MonkeyPatch, command: str, expected: Callable[[], dict], json_flag: list[str]
-) -> None:
+def test_schema_printed_to_stdout_is_exactly_the_schema(tmp_path: Path) -> None:
     """`agentic-hil schema > agentic-hil.schema.json` has to write a file that loads.
 
     Without `--output` the command writes the document to stdout and returns
     `{"ok": true}`, which the entrypoint then prints after it as `OK.` or as a
     second JSON document, so the redirect captured two things and `json.loads`
     failed on both spellings while the exit code was 0."""
-    _agent_host(monkeypatch)
 
-    code, out, _ = _shell([command, *json_flag])
+    def check_row(_workspace, monkeypatch, json_flag: list[str], command: str, expected: Callable[[], dict]) -> None:
+        _agent_host(monkeypatch)
 
-    assert code == 0
-    document, end = json.JSONDecoder().raw_decode(out)
-    trailing = out[end:].strip()
-    assert trailing == "", f"{command} printed more than the document: {trailing!r}"
-    assert document == expected()
+        code, out, _ = _shell([command, *json_flag])
+
+        assert code == 0
+        document, end = json.JSONDecoder().raw_decode(out)
+        trailing = out[end:].strip()
+        assert trailing == "", f"{command} printed more than the document: {trailing!r}"
+        assert document == expected()
+
+    rows = combine_parameter_rows(
+        parameter_rows([[], ["--json"]], ids=['rendered', 'json']),
+        parameter_rows([
+        ("schema", lambda: json.loads(config_schema_text())),
+        ("test-schema", _bundled_test_schema),
+        ("mcp-config", lambda: json.loads(cli.mcp_config_text())),
+    ], multiple=True, ids=['schema-<lambda>', 'test-schema-_bundled_test_schema', 'mcp-config-<lambda>']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("command", ["schema", "test-schema", "mcp-config"])
-def test_schema_written_to_a_file_still_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+def test_schema_written_to_a_file_still_says_so(tmp_path: Path) -> None:
     """The neighbour: with `--output` the result is the only thing on stdout, as before."""
-    _agent_host(monkeypatch)
-    monkeypatch.chdir(tmp_path)
-    target = tmp_path / f"{command}.json"
 
-    code, out, _ = _shell([command, "--output", target.name])
+    def check_row(tmp_path, monkeypatch, command: str) -> None:
+        _agent_host(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / f"{command}.json"
 
-    assert code == 0, out
-    assert "written" in out
-    assert not out.lstrip().startswith("{")
-    assert json.loads(target.read_text(encoding="utf-8"))
+        code, out, _ = _shell([command, "--output", target.name])
+
+        assert code == 0, out
+        assert "written" in out
+        assert not out.lstrip().startswith("{")
+        assert json.loads(target.read_text(encoding="utf-8"))
+
+    rows = parameter_rows(["schema", "test-schema", "mcp-config"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -292,26 +298,34 @@ NESTED_REFUSALS = [
 ]
 
 
-@pytest.mark.parametrize(("command", "document"), NESTED_REFUSALS, ids=[command for command, _ in NESTED_REFUSALS])
-def test_a_refusal_nested_in_doctor_names_the_command_the_reader_can_type(command: str, document: Callable[[], dict]) -> None:
+def test_a_refusal_nested_in_doctor_names_the_command_the_reader_can_type(tmp_path: Path) -> None:
     """#451 spelled `debugger_probes_list` as `agentic-hil debugger-probes` for the
     reader at a shell, and only at the top level: the same refusal one level in,
     under a doctor check or an init step, still sent them to a name their shell
     does not have."""
-    out = _reflowed(render_result(document(), command))
 
-    assert "agentic-hil debugger-probes" in out
-    assert "debugger_probes_list" not in out
+    def check_row(_workspace, _patch, command: str, document: Callable[[], dict]) -> None:
+        out = _reflowed(render_result(document(), command))
+
+        assert "agentic-hil debugger-probes" in out
+        assert "debugger_probes_list" not in out
+
+    rows = parameter_rows(NESTED_REFUSALS, multiple=True, ids=[command for command, _ in NESTED_REFUSALS])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(("command", "document"), NESTED_REFUSALS, ids=[command for command, _ in NESTED_REFUSALS])
-def test_a_nested_refusal_rendered_for_nobody_keeps_the_tools_name(command: str, document: Callable[[], dict]) -> None:
+def test_a_nested_refusal_rendered_for_nobody_keeps_the_tools_name(tmp_path: Path) -> None:
     """The neighbour: `command` is the fact that a person is reading. Without it the
     step is printed as the catalogue wrote it, which is the agent's vocabulary."""
-    del command
-    out = _reflowed(render_result(document()))
 
-    assert "debugger_probes_list" in out
+    def check_row(_workspace, _patch, command: str, document: Callable[[], dict]) -> None:
+        del command
+        out = _reflowed(render_result(document()))
+
+        assert "debugger_probes_list" in out
+
+    rows = parameter_rows(NESTED_REFUSALS, multiple=True, ids=[command for command, _ in NESTED_REFUSALS])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -692,29 +706,27 @@ EXIT_CODES: list[tuple[str, list[str], int, Callable[[pytest.MonkeyPatch, Path],
 ]
 
 
-@pytest.mark.parametrize(("argv", "expected", "prepare"), [case[1:] for case in EXIT_CODES], ids=[case[0] for case in EXIT_CODES])
-def test_every_command_exits_with_its_verdict(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-    expected: int,
-    prepare: Callable[[pytest.MonkeyPatch, Path], None] | None,
-) -> None:
+def test_every_command_exits_with_its_verdict(tmp_path: Path) -> None:
     """The matrix the CHANGELOG has had to correct twice (#445, #450), pinned at
     the entrypoint for the commands nothing drove there: one success and one
     refusal per command, over the generated configuration, and the hardware-bound
     commands through the refusal path that needs no tool."""
-    workspace = _generated_bench(tmp_path, monkeypatch)
-    if prepare is not None:
-        prepare(monkeypatch, workspace)
 
-    code, out, err = _shell(argv)
+    def check_row(tmp_path, monkeypatch, argv: list[str], expected: int, prepare: Callable[[pytest.MonkeyPatch, Path], None] | None) -> None:
+        workspace = _generated_bench(tmp_path, monkeypatch)
+        if prepare is not None:
+            prepare(monkeypatch, workspace)
 
-    assert code == expected, f"{' '.join(argv)} exited {code}, not {expected}:\n{out}\n{err}"
-    # And the same verdict for the caller that parses.
-    json_code, out, _ = _shell([*argv, "--json"])
-    assert json_code == expected, f"{' '.join(argv)} --json exited {json_code}, not {expected}:\n{out}"
-    assert json.loads(out)
+        code, out, err = _shell(argv)
+
+        assert code == expected, f"{' '.join(argv)} exited {code}, not {expected}:\n{out}\n{err}"
+        # And the same verdict for the caller that parses.
+        json_code, out, _ = _shell([*argv, "--json"])
+        assert json_code == expected, f"{' '.join(argv)} --json exited {json_code}, not {expected}:\n{out}"
+        assert json.loads(out)
+
+    rows = parameter_rows([case[1:] for case in EXIT_CODES], multiple=True, ids=[case[0] for case in EXIT_CODES])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_no_subcommand_is_a_usage_error_on_stderr() -> None:
@@ -764,29 +776,31 @@ WIRING: list[tuple[list[str], str, dict[str, object]]] = [
 ]
 
 
-@pytest.mark.parametrize(("argv", "handler", "expected"), WIRING, ids=[" ".join(case[0]) for case in WIRING])
-def test_every_command_reaches_its_handler_with_the_parsed_options(
-    monkeypatch: pytest.MonkeyPatch, argv: list[str], handler: str, expected: dict[str, object]
-) -> None:
+def test_every_command_reaches_its_handler_with_the_parsed_options(tmp_path: Path) -> None:
     """A renamed `dest` raises AttributeError at run time and no test noticed,
     because the dispatch lines for these commands were never driven. The handler
     is replaced by a recorder; what reaches it is bound against the real
     handler's signature so the check is by parameter name."""
-    original = getattr(cli, handler)
-    signature = inspect.signature(original)
-    seen: list[dict[str, object]] = []
 
-    def recorded(*args: object, **kwargs: object) -> dict:
-        seen.append(dict(signature.bind(*args, **kwargs).arguments))
-        return {"ok": True, "summary": "recorded"}
+    def check_row(_workspace, monkeypatch, argv: list[str], handler: str, expected: dict[str, object]) -> None:
+        original = getattr(cli, handler)
+        signature = inspect.signature(original)
+        seen: list[dict[str, object]] = []
 
-    monkeypatch.setattr(cli, handler, recorded)
-    monkeypatch.setattr(cli, "load_cli_authoritative_config", lambda path: CONFIG)
+        def recorded(*args: object, **kwargs: object) -> dict:
+            seen.append(dict(signature.bind(*args, **kwargs).arguments))
+            return {"ok": True, "summary": "recorded"}
 
-    code, out, _ = _shell([*argv, "--json"])
+        monkeypatch.setattr(cli, handler, recorded)
+        monkeypatch.setattr(cli, "load_cli_authoritative_config", lambda path: CONFIG)
 
-    assert code == 0, out
-    assert seen == [expected]
+        code, out, _ = _shell([*argv, "--json"])
+
+        assert code == 0, out
+        assert seen == [expected]
+
+    rows = parameter_rows(WIRING, multiple=True, ids=[" ".join(case[0]) for case in WIRING])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(
@@ -1045,15 +1059,19 @@ def test_setup_and_agent_install_help_name_the_agents_the_default_and_what_leavi
     assert any(word in sentence for word in ("omit", "without", "left out", "not given", "unless")), f"does not say what leaving it out does: {sentence}"
 
 
-@pytest.mark.parametrize("command", AGENT_COMMANDS)
-def test_every_agent_option_prints_the_agents_the_install_code_knows(command: str) -> None:
+def test_every_agent_option_prints_the_agents_the_install_code_knows(tmp_path: Path) -> None:
     """Decided with the issue: `choices` on every `--agent`, from `KNOWN_AGENTS`,
     the one list each of these commands resolves an agent name against, so
     `--help` prints the accepted values. It is the same list for all six: no
     command knows an agent another one does not."""
-    option_help = _agent_option_help(command)
 
-    assert _printed_choices(option_help) == cli.supported_skill_agents(), option_help
+    def check_row(_workspace, _patch, command: str) -> None:
+        option_help = _agent_option_help(command)
+
+        assert _printed_choices(option_help) == cli.supported_skill_agents(), option_help
+
+    rows = parameter_rows(AGENT_COMMANDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_every_agent_option_reads_its_choices_from_that_list(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1070,32 +1088,44 @@ def test_every_agent_option_reads_its_choices_from_that_list(monkeypatch: pytest
     assert [agent.id for agent in cli.skill_agents()] == [*(agent.id for agent in known), "example-agent"]
 
 
-@pytest.mark.parametrize("command", [command for command in AGENT_COMMANDS if isinstance(OMITTED_AGENT[command], str)])
-def test_every_agent_option_with_a_default_agent_prints_it(command: str) -> None:
+def test_every_agent_option_with_a_default_agent_prints_it(tmp_path: Path) -> None:
     """Decided with the issue: every such option shows its default in the help,
     and the default stays what it is today: `claude-code` for `setup` and
     `agent-install`, `opencode` for `skill-install`."""
-    option_help = _agent_option_help(command)
 
-    assert f"(default: {OMITTED_AGENT[command]})" in option_help, option_help
+    def check_row(_workspace, _patch, command: str) -> None:
+        option_help = _agent_option_help(command)
+
+        assert f"(default: {OMITTED_AGENT[command]})" in option_help, option_help
+
+    rows = parameter_rows([command for command in AGENT_COMMANDS if isinstance(OMITTED_AGENT[command], str)])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("command", [command for command in AGENT_COMMANDS if not isinstance(OMITTED_AGENT[command], str)])
-def test_an_agent_option_whose_absence_names_no_single_agent_prints_no_default(command: str) -> None:
+def test_an_agent_option_whose_absence_names_no_single_agent_prints_no_default(tmp_path: Path) -> None:
     """`init` without `--agent` asks no agent for anything, and `upgrade` and
     `uninstall` without one act on every agent this installation set up; their
     help sentences say so. A `(default: None)` or `(default: [])` printed after
     them would contradict the sentence it stands beside."""
-    option_help = _agent_option_help(command)
 
-    assert "(default:" not in option_help, option_help
+    def check_row(_workspace, _patch, command: str) -> None:
+        option_help = _agent_option_help(command)
+
+        assert "(default:" not in option_help, option_help
+
+    rows = parameter_rows([command for command in AGENT_COMMANDS if not isinstance(OMITTED_AGENT[command], str)])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("command", AGENT_COMMANDS)
-def test_an_omitted_agent_reaches_every_command_as_it_does_today(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+def test_an_omitted_agent_reaches_every_command_as_it_does_today(tmp_path: Path) -> None:
     """Decided with the issue: the defaults stay where they are. A default that
     follows the agents the installer found is a separate change."""
-    assert _dispatched(monkeypatch, [command]).agent == OMITTED_AGENT[command]
+
+    def check_row(_workspace, monkeypatch, command: str) -> None:
+        assert _dispatched(monkeypatch, [command]).agent == OMITTED_AGENT[command]
+
+    rows = parameter_rows(AGENT_COMMANDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize("command", ["agent-install", "setup"])
@@ -1113,57 +1143,71 @@ def test_an_omitted_agent_still_registers_claude_code(tmp_path: Path, monkeypatc
     assert [agent.id for agent in cli.skill_agents() if Path(agent.default_target_path).is_file()] == ["claude-code"]
 
 
-@pytest.mark.parametrize("command", AGENT_COMMANDS)
-def test_a_wrong_agent_is_refused_at_parsing_with_the_accepted_values(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+def test_a_wrong_agent_is_refused_at_parsing_with_the_accepted_values(tmp_path: Path) -> None:
     """Decided with the issue: a value that is no agent never reaches the
     command, and the refusal names the value and every agent that would have
     been accepted. `skill-install` is asked without `--target`, the one way it
     refuses an agent it does not know today."""
-    code, out, err = _parse_error(monkeypatch, [command, "--agent", "not-an-agent"])
-    error = err.rstrip("\n").rpartition("\n")[2]
 
-    assert code == 2
-    assert out == ""
-    assert error.startswith(f"agentic-hil {command}: error: argument --agent"), err
-    assert "not-an-agent" in error
-    for agent in cli.supported_skill_agents():
-        assert agent in error, error
+    def check_row(_workspace, monkeypatch, command: str) -> None:
+        code, out, err = _parse_error(monkeypatch, [command, "--agent", "not-an-agent"])
+        error = err.rstrip("\n").rpartition("\n")[2]
+
+        assert code == 2
+        assert out == ""
+        assert error.startswith(f"agentic-hil {command}: error: argument --agent"), err
+        assert "not-an-agent" in error
+        for agent in cli.supported_skill_agents():
+            assert agent in error, error
+
+    rows = parameter_rows(AGENT_COMMANDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("json_flag", [[], ["--json"]], ids=["rendered", "json"])
-@pytest.mark.parametrize("command", AGENT_COMMANDS)
-def test_a_refused_agent_is_reported_the_way_every_other_parse_error_is(monkeypatch: pytest.MonkeyPatch, command: str, json_flag: list[str]) -> None:
+def test_a_refused_agent_is_reported_the_way_every_other_parse_error_is(tmp_path: Path) -> None:
     """Decided with the issue: no second error path. A parse error in this CLI
     is argparse's own: the command's usage and one `error:` line on stderr,
     nothing on stdout, exit 2, and `--json` changes none of it, because it is
     read only once the command line has parsed. The neighbour it is held to is
     the parse error the same option already has, a missing value."""
-    missing = _parse_error(monkeypatch, [command, *json_flag, "--agent"])
-    refused = _parse_error(monkeypatch, [command, *json_flag, "--agent", "not-an-agent"])
-    usage, marker, error = refused[2].partition(f"agentic-hil {command}: error: ")
 
-    assert refused[0] == missing[0] == 2
-    assert refused[1] == missing[1] == ""
-    assert marker, refused[2]
-    assert usage == missing[2].partition(marker)[0]
-    assert error.startswith("argument --agent: "), error
+    def check_row(_workspace, monkeypatch, command: str, json_flag: list[str]) -> None:
+        missing = _parse_error(monkeypatch, [command, *json_flag, "--agent"])
+        refused = _parse_error(monkeypatch, [command, *json_flag, "--agent", "not-an-agent"])
+        usage, marker, error = refused[2].partition(f"agentic-hil {command}: error: ")
+
+        assert refused[0] == missing[0] == 2
+        assert refused[1] == missing[1] == ""
+        assert marker, refused[2]
+        assert usage == missing[2].partition(marker)[0]
+        assert error.startswith("argument --agent: "), error
+
+    rows = combine_parameter_rows(
+        parameter_rows(AGENT_COMMANDS, ids=['init', 'skill-install', 'agent-install', 'setup', 'upgrade', 'uninstall']),
+        parameter_rows([[], ["--json"]], ids=['rendered', 'json']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("command", AGENT_COMMANDS)
-def test_every_spelling_an_agent_option_accepts_today_still_reaches_that_agent(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+def test_every_spelling_an_agent_option_accepts_today_still_reaches_that_agent(tmp_path: Path) -> None:
     """Decided with the issue: a value outside the list that a command accepts
     today keeps working. All six resolve `--agent` through
     `resolve_skill_agent`, which takes each agent's aliases in any case, with
     `_` for `-` and with blanks around them: `claude` among them, which both
     installers pass on as the operator typed it and the plugin skill publishes
     as `agentic-hil setup --agent claude`."""
-    for agent in cli.skill_agents():
-        for alias in agent.aliases:
-            for spelling in (alias, alias.upper(), alias.replace("-", "_"), f" {alias} "):
-                value = _dispatched(monkeypatch, [command, "--agent", spelling]).agent
-                named = value[0] if isinstance(value, list) else value
-                resolved = cli.resolve_skill_agent(named)
-                assert resolved is not None and resolved.id == agent.id, f"`{command} --agent {spelling!r}` reached the command as {value!r}"
+
+    def check_row(_workspace, monkeypatch, command: str) -> None:
+        for agent in cli.skill_agents():
+            for alias in agent.aliases:
+                for spelling in (alias, alias.upper(), alias.replace("-", "_"), f" {alias} "):
+                    value = _dispatched(monkeypatch, [command, "--agent", spelling]).agent
+                    named = value[0] if isinstance(value, list) else value
+                    resolved = cli.resolve_skill_agent(named)
+                    assert resolved is not None and resolved.id == agent.id, f"`{command} --agent {spelling!r}` reached the command as {value!r}"
+
+    rows = parameter_rows(AGENT_COMMANDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_skill_install_with_a_target_still_takes_an_agent_the_list_does_not_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1226,36 +1270,44 @@ def _without_a_home_directory(no_home: pytest.MonkeyPatch) -> None:
         Path.home()
 
 
-@pytest.mark.parametrize("command", AGENT_COMMANDS)
-def test_every_agent_option_prints_its_agents_where_no_home_directory_can_be_found(command: str) -> None:
+def test_every_agent_option_prints_its_agents_where_no_home_directory_can_be_found(tmp_path: Path) -> None:
     """`--help` needs no home directory, and it needed none before `--agent`
     had choices: the choices are the agents' names, and a name does not depend
     on where its agent keeps the skill. An account with no home directory, a
     service or a container user, still gets the help, choices included, and
     exit 0."""
-    agents = cli.supported_skill_agents()
-    with pytest.MonkeyPatch.context() as no_home:
-        _without_a_home_directory(no_home)
-        option_help = _agent_option_help(command)
 
-    assert _printed_choices(option_help) == agents, option_help
+    def check_row(_workspace, _patch, command: str) -> None:
+        agents = cli.supported_skill_agents()
+        with pytest.MonkeyPatch.context() as no_home:
+            _without_a_home_directory(no_home)
+            option_help = _agent_option_help(command)
+
+        assert _printed_choices(option_help) == agents, option_help
+
+    rows = parameter_rows(AGENT_COMMANDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("command", AGENT_COMMANDS)
-def test_a_wrong_agent_is_refused_at_parsing_where_no_home_directory_can_be_found(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+def test_a_wrong_agent_is_refused_at_parsing_where_no_home_directory_can_be_found(tmp_path: Path) -> None:
     """Nor does checking a name against them: without a home directory a wrong
     `--agent` is still the usage error it is everywhere else, argparse's
     `invalid choice` line naming the value and every agent, exit 2 and nothing
     on stdout, not a traceback. `skill-install` is asked without `--target`,
     where it checks the name once the rest of the line has parsed."""
-    agents = cli.supported_skill_agents()
-    with pytest.MonkeyPatch.context() as no_home:
-        _without_a_home_directory(no_home)
-        code, out, err = _parse_error(monkeypatch, [command, "--agent", "nonsense"])
-    error = err.rstrip("\n").rpartition("\n")[2]
 
-    assert code == 2, err
-    assert out == ""
-    assert error.startswith(f"agentic-hil {command}: error: argument --agent: invalid choice: 'nonsense'"), err
-    for agent in agents:
-        assert agent in error, error
+    def check_row(_workspace, monkeypatch, command: str) -> None:
+        agents = cli.supported_skill_agents()
+        with pytest.MonkeyPatch.context() as no_home:
+            _without_a_home_directory(no_home)
+            code, out, err = _parse_error(monkeypatch, [command, "--agent", "nonsense"])
+        error = err.rstrip("\n").rpartition("\n")[2]
+
+        assert code == 2, err
+        assert out == ""
+        assert error.startswith(f"agentic-hil {command}: error: argument --agent: invalid choice: 'nonsense'"), err
+        for agent in agents:
+            assert agent in error, error
+
+    rows = parameter_rows(AGENT_COMMANDS)
+    check_parameter_rows(tmp_path, rows, check_row)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from parameter_rows import check_parameter_rows, parameter_rows
 
 from agentic_hil.backends.pyocd import PyOCDBackend
 from agentic_hil.config import load_config
@@ -19,31 +20,35 @@ def backend(tmp_path: Path) -> PyOCDBackend:
     return PyOCDBackend(load_config(str(config_path)))
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
+def test_pyocd_flash_failure_phrases_have_a_flash_remedy(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, message: str) -> None:
+        config_path = write_config(tmp_path, debugger_type="pyocd", probe_id="PYOCD123", target_type="stm32f446re")
+        backend = PyOCDBackend(load_config(str(config_path)))
+        assert backend._classify_output(message, "flash_firmware") == "flash_failed"
+
+    rows = parameter_rows([
         "attempt to program invalid flash address",
         "flash uninit (result code 0x1)",
         "target was not halted as expected",
         "flash algorithm overflowed stack",
         "program page sequence not available",
         "delegate is not available",
-    ],
-)
-def test_pyocd_flash_failure_phrases_have_a_flash_remedy(backend: PyOCDBackend, message: str) -> None:
-    assert backend._classify_output(message, "flash_firmware") == "flash_failed"
+    ])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
+def test_pyocd_flash_error_shapes_are_classified(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, message: str, expected: str) -> None:
+        config_path = write_config(tmp_path, debugger_type="pyocd", probe_id="PYOCD123", target_type="stm32f446re")
+        backend = PyOCDBackend(load_config(str(config_path)))
+        assert backend._classify_output(message, "flash_firmware") == expected
+
+    rows = parameter_rows([
         ("flash program page failure (address 0x08000000; result code 0x1)", "flash_failed"),
         ("flash erase sector failure (address 0x08004000; result code 0x1)", "flash_erase_failed"),
         ("SWD/JTAG communication failure (No ACK)", "target_not_detected"),
-    ],
-)
-def test_pyocd_flash_error_shapes_are_classified(backend: PyOCDBackend, message: str, expected: str) -> None:
-    assert backend._classify_output(message, "flash_firmware") == expected
+    ], multiple=True, ids=['flash program page failure (address 0x08000000; result code 0x1)-flash_failed', 'flash erase sector failure (address 0x08004000; result code 0x1)-flash_erase_failed', 'SWD/JTAG communication failure (No ACK)-target_not_detected'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # pyOCD 0.45.1 warns `flash uninit sequence not available`
@@ -107,15 +112,18 @@ def test_failed_post_flash_reset_keeps_the_successful_flash_contact(backend: PyO
     assert "verified" not in result["summary"].lower()
 
 
-@pytest.mark.parametrize("error_type", ["flash_failed", "flash_erase_failed", "verify_failed"])
-def test_pyocd_flash_remedy_does_not_claim_an_unperformed_readback(error_type: str) -> None:
-    from agentic_hil.knowledge import catalogue_entry
+def test_pyocd_flash_remedy_does_not_claim_an_unperformed_readback(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, error_type: str) -> None:
+        from agentic_hil.knowledge import catalogue_entry
 
-    remedy = catalogue_entry(f"{error_type}:pyocd")
-    assert remedy is not None
-    wording = " ".join([remedy["meaning"], *remedy["remediation"], *remedy.get("do_not", [])]).lower()
+        remedy = catalogue_entry(f"{error_type}:pyocd")
+        assert remedy is not None
+        wording = " ".join([remedy["meaning"], *remedy["remediation"], *remedy.get("do_not", [])]).lower()
 
-    assert "flash programs and verifies" not in wording
+        assert "flash programs and verifies" not in wording
+
+    rows = parameter_rows(["flash_failed", "flash_erase_failed", "verify_failed"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_failed_flash_does_not_claim_readback_verification(backend: PyOCDBackend, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,35 +206,37 @@ def test_probe_enumeration_extracts_final_error_line_from_pretty_json_without_st
     assert result["programmer_output"]["returncode"] == 1
 
 
-@pytest.mark.parametrize(
-    ("payload", "diagnostic"),
-    [
+def test_probe_enumeration_failure_preserves_json_and_stderr_diagnostics(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, payload: dict, diagnostic: str) -> None:
+        config_path = write_config(tmp_path, debugger_type="pyocd", probe_id="PYOCD123", target_type="stm32f446re")
+        backend = PyOCDBackend(load_config(str(config_path)))
+        from agentic_hil.backends.common import CompletedCommand
+
+        executable = tmp_path / "pyocd.exe"
+        monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+        raw_json = json.dumps(payload)
+        monkeypatch.setattr(
+            "agentic_hil.backends.pyocd.spawn_command",
+            lambda *args, **kwargs: CompletedCommand(stdout=raw_json, stderr="Traceback: cannot open USB probe", returncode=1, timed_out=False, not_found=False),
+        )
+
+        result = backend._enumerate_probes("debugger_probes_list")
+        assert result["ok"] is False
+        if diagnostic:
+            assert result["summary"] == f"pyOCD probe discovery command failed: {diagnostic}"
+        else:
+            assert result["summary"] == "pyOCD probe discovery command failed: Traceback: cannot open USB probe"
+        assert result["programmer_output"]["stdout"] == raw_json
+        assert result["programmer_output"]["stderr"].endswith("cannot open USB probe")
+        log_path = Path(backend.config.workspace_root) / result["log_path"]
+        assert json.loads(log_path.read_text(encoding="utf-8"))["stdout"] == raw_json
+
+    rows = parameter_rows([
         ({"status": 1, "error": "USB probe could not be opened"}, "USB probe could not be opened"),
         ({"status": 1, "error": 12}, ""),
         ({"status": 1, "error": {"detail": "bad USB handle"}}, "bad USB handle"),
-    ],
-)
-def test_probe_enumeration_failure_preserves_json_and_stderr_diagnostics(backend: PyOCDBackend, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload: dict, diagnostic: str) -> None:
-    from agentic_hil.backends.common import CompletedCommand
-
-    executable = tmp_path / "pyocd.exe"
-    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
-    raw_json = json.dumps(payload)
-    monkeypatch.setattr(
-        "agentic_hil.backends.pyocd.spawn_command",
-        lambda *args, **kwargs: CompletedCommand(stdout=raw_json, stderr="Traceback: cannot open USB probe", returncode=1, timed_out=False, not_found=False),
-    )
-
-    result = backend._enumerate_probes("debugger_probes_list")
-    assert result["ok"] is False
-    if diagnostic:
-        assert result["summary"] == f"pyOCD probe discovery command failed: {diagnostic}"
-    else:
-        assert result["summary"] == "pyOCD probe discovery command failed: Traceback: cannot open USB probe"
-    assert result["programmer_output"]["stdout"] == raw_json
-    assert result["programmer_output"]["stderr"].endswith("cannot open USB probe")
-    log_path = Path(backend.config.workspace_root) / result["log_path"]
-    assert json.loads(log_path.read_text(encoding="utf-8"))["stdout"] == raw_json
+    ], multiple=True, ids=['payload0-USB probe could not be opened', 'payload1-', 'payload2-bad USB handle'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(

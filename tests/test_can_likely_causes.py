@@ -68,6 +68,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from conftest import write_config
+from parameter_rows import check_parameter_rows, combine_parameter_rows, parameter_rows
 
 import agentic_hil.bridge as bridge_module_under_test
 import agentic_hil.can as can_module_under_test
@@ -712,59 +713,73 @@ def assert_causes_are_about_the_bus(causes: object, error_type: str, context: ob
 # The gap: a CAN report classified over each table the classifier is handed.
 
 
-@pytest.mark.parametrize("error_type", CAN_ERROR_TYPES)
-def test_a_can_report_is_classified_about_the_bus_over_the_com_port_table(tmp_path: Path, error_type: str) -> None:
+def test_a_can_report_is_classified_about_the_bus_over_the_com_port_table(tmp_path: Path) -> None:
     """The COM port table is `comports.likely_causes`, keyed by the serial error
     types with `inspect the COM port log for details` for everything else, and a
     CAN error type is everything else."""
-    config = config_for(tmp_path)
-    write_report(config, can_report(error_type))
 
-    classified = classify_failure_report(config, com_port_likely_causes)
+    def check_row(tmp_path, _patch, error_type: str) -> None:
+        config = config_for(tmp_path)
+        write_report(config, can_report(error_type))
 
-    assert classified["ok"] is True, classified
-    assert classified["error_type"] == error_type, classified
-    assert_causes_are_about_the_bus(classified["likely_causes"], error_type, classified)
+        classified = classify_failure_report(config, com_port_likely_causes)
+
+        assert classified["ok"] is True, classified
+        assert classified["error_type"] == error_type, classified
+        assert_causes_are_about_the_bus(classified["likely_causes"], error_type, classified)
+
+    rows = parameter_rows(CAN_ERROR_TYPES)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("debugger_type", DEBUGGER_TYPES)
-@pytest.mark.parametrize("error_type", CAN_ERROR_TYPES)
-def test_a_can_report_is_classified_about_the_bus_through_a_service_on_a_debugger(tmp_path: Path, error_type: str, debugger_type: str) -> None:
+def test_a_can_report_is_classified_about_the_bus_through_a_service_on_a_debugger(tmp_path: Path) -> None:
     """The whole path an agent takes: the failure is recorded by the CAN tool and
     read back with `classify_last_error`, whose table is the bound debugger's."""
-    config = config_for(tmp_path, debugger_type=debugger_type)
-    write_report(config, can_report(error_type))
-    service = AgenticHILToolService(config)
-    try:
-        classified = service.call("classify_last_error")
-    finally:
-        service.close()
 
-    assert classified["ok"] is True, classified
-    assert classified["error_type"] == error_type, classified
-    assert classified["source_tool"] == "can_session_start", classified
-    assert_causes_are_about_the_bus(classified["likely_causes"], error_type, classified)
-
-
-@pytest.mark.parametrize("error_type", CAN_ERROR_TYPES)
-def test_a_can_report_is_classified_the_same_whatever_table_the_backend_hands_over(tmp_path: Path, error_type: str) -> None:
-    """A bus failure is a fact about the bus, so the answer must not depend on
-    which probe, or no probe at all, happens to be bound in this project."""
-    config = config_for(tmp_path)
-    write_report(config, can_report(error_type))
-
-    tables = {"com_port": com_port_likely_causes, "unbound": None}
-    answers = {name: (UnboundDebuggerBackend(config).classify_last_error() if table is None else classify_failure_report(config, table))["likely_causes"] for name, table in tables.items()}
-    for debugger_type in DEBUGGER_TYPES:
-        backend_config = config_for(tmp_path / debugger_type, debugger_type=debugger_type)
-        write_report(backend_config, can_report(error_type))
-        service = AgenticHILToolService(backend_config)
+    def check_row(tmp_path, _patch, error_type: str, debugger_type: str) -> None:
+        config = config_for(tmp_path, debugger_type=debugger_type)
+        write_report(config, can_report(error_type))
+        service = AgenticHILToolService(config)
         try:
-            answers[debugger_type] = service.call("classify_last_error")["likely_causes"]
+            classified = service.call("classify_last_error")
         finally:
             service.close()
 
-    assert len(set(map(tuple, answers.values()))) == 1, answers
+        assert classified["ok"] is True, classified
+        assert classified["error_type"] == error_type, classified
+        assert classified["source_tool"] == "can_session_start", classified
+        assert_causes_are_about_the_bus(classified["likely_causes"], error_type, classified)
+
+    rows = combine_parameter_rows(
+        parameter_rows(CAN_ERROR_TYPES, ids=['can_interface_not_found', 'can_adapter_library_missing', 'can_channel_not_available', 'can_listen_only_unsupported', 'can_queue_clear_failed', 'can_send_failed', 'can_interface_down', 'can_listen_only_mode', 'can_listen_only_unconfirmed', 'can_queue_clear_limit', 'can_read_failed', 'can_adapter_open_failed', 'can_adapter_close_failed', 'can_adapter_not_found', 'can_adapter_process_start_failed', 'can_adapter_invalid_response', 'can_adapter_protocol_unsupported', 'can_backend_not_available', 'can_bus_not_configured', 'can_fd_remote_frame_unsupported', 'can_classic_frame_too_large', 'can_fd_frame_length_invalid', 'can_adapter_timeout', 'can_adapter_process_exited', 'can_adapter_invalid_request', 'can_adapter_close_interrupted', 'can_participant_required', 'can_participant_not_configured']),
+        parameter_rows(DEBUGGER_TYPES, ids=['openocd', 'stlink', 'pyocd']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
+
+
+def test_a_can_report_is_classified_the_same_whatever_table_the_backend_hands_over(tmp_path: Path) -> None:
+    """A bus failure is a fact about the bus, so the answer must not depend on
+    which probe, or no probe at all, happens to be bound in this project."""
+
+    def check_row(tmp_path, _patch, error_type: str) -> None:
+        config = config_for(tmp_path)
+        write_report(config, can_report(error_type))
+
+        tables = {"com_port": com_port_likely_causes, "unbound": None}
+        answers = {name: (UnboundDebuggerBackend(config).classify_last_error() if table is None else classify_failure_report(config, table))["likely_causes"] for name, table in tables.items()}
+        for debugger_type in DEBUGGER_TYPES:
+            backend_config = config_for(tmp_path / debugger_type, debugger_type=debugger_type)
+            write_report(backend_config, can_report(error_type))
+            service = AgenticHILToolService(backend_config)
+            try:
+                answers[debugger_type] = service.call("classify_last_error")["likely_causes"]
+            finally:
+                service.close()
+
+        assert len(set(map(tuple, answers.values()))) == 1, answers
+
+    rows = parameter_rows(CAN_ERROR_TYPES)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_each_can_error_type_gets_causes_of_its_own(tmp_path: Path) -> None:
@@ -1131,9 +1146,12 @@ def test_every_session_class_built_on_the_bridge_is_read_for_the_inventory() -> 
 # The rows themselves: the seven unchanged, and the one the issue calls out.
 
 
-@pytest.mark.parametrize("error_type", CAN_ERROR_TYPES_FROM_517)
-def test_the_rows_decided_in_517_are_unchanged(error_type: str) -> None:
-    assert can_module_under_test.CAN_LIKELY_CAUSES[error_type] == ROWS_FROM_517[error_type]
+def test_the_rows_decided_in_517_are_unchanged(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, error_type: str) -> None:
+        assert can_module_under_test.CAN_LIKELY_CAUSES[error_type] == ROWS_FROM_517[error_type]
+
+    rows = parameter_rows(CAN_ERROR_TYPES_FROM_517)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_the_listen_only_mode_row_says_what_the_bus_refuses_and_what_decides_it() -> None:
@@ -1194,8 +1212,7 @@ def test_the_com_port_causes_are_unchanged() -> None:
     assert com_port_likely_causes("no_such_serial_error") == COM_PORT_FALLBACK
 
 
-@pytest.mark.parametrize("debugger_type", DEBUGGER_TYPES)
-def test_the_debugger_causes_are_unchanged(tmp_path: Path, debugger_type: str) -> None:
+def test_the_debugger_causes_are_unchanged(tmp_path: Path) -> None:
     """Verbatim, and over the public path a caller takes.
 
     One type per backend rather than the whole table, chosen because the three
@@ -1203,18 +1220,23 @@ def test_the_debugger_causes_are_unchanged(tmp_path: Path, debugger_type: str) -
     here. Read back through `classify_last_error` rather than off the backend's
     table attribute, so this pins what a caller receives.
     """
-    config = config_for(tmp_path, debugger_type=debugger_type)
-    write_report(config, {"ok": False, "tool": "probe_target", "error_type": "target_not_detected", "summary": "Debugger could not detect the target."})
-    service = AgenticHILToolService(config)
-    try:
-        detected = service.call("classify_last_error")["likely_causes"]
-        write_report(config, {"ok": False, "tool": "probe_target", "error_type": "no_such_debugger_error", "summary": "Debugger failed."})
-        unknown = service.call("classify_last_error")["likely_causes"]
-    finally:
-        service.close()
 
-    assert detected == DEBUGGER_TARGET_NOT_DETECTED[debugger_type], detected
-    assert unknown == DEBUGGER_FALLBACK, unknown
+    def check_row(tmp_path, _patch, debugger_type: str) -> None:
+        config = config_for(tmp_path, debugger_type=debugger_type)
+        write_report(config, {"ok": False, "tool": "probe_target", "error_type": "target_not_detected", "summary": "Debugger could not detect the target."})
+        service = AgenticHILToolService(config)
+        try:
+            detected = service.call("classify_last_error")["likely_causes"]
+            write_report(config, {"ok": False, "tool": "probe_target", "error_type": "no_such_debugger_error", "summary": "Debugger failed."})
+            unknown = service.call("classify_last_error")["likely_causes"]
+        finally:
+            service.close()
+
+        assert detected == DEBUGGER_TARGET_NOT_DETECTED[debugger_type], detected
+        assert unknown == DEBUGGER_FALLBACK, unknown
+
+    rows = parameter_rows(DEBUGGER_TYPES)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_serial_report_still_answers_the_com_port_table(tmp_path: Path) -> None:

@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 import yaml
 from conftest import write_authoritative_config, write_config
+from parameter_rows import check_parameter_rows, combine_parameter_rows, parameter_rows
 
 from agentic_hil.adopt import plan_adoption
 from agentic_hil.config import ConfigError, carry_over_permissions, config_schema, load_authoritative_config
@@ -366,19 +367,25 @@ def test_the_schema_puts_the_supply_entry_under_additional_properties() -> None:
         assert dash not in text
 
 
-@pytest.mark.parametrize("where", ["supply", "channel"])
-@pytest.mark.parametrize("key", ["voltage_limit_v", "current_limit_a"])
-def test_a_limit_description_says_an_absent_limit_refuses_every_write(where: str, key: str) -> None:
+def test_a_limit_description_says_an_absent_limit_refuses_every_write(tmp_path: Path) -> None:
     """The code refuses every write while a limit is missing and never takes one from the type's range."""
-    entry = config_schema()["properties"]["power_supplies"]["additionalProperties"]
-    if where == "channel":
-        entry = entry["properties"]["channels"]["additionalProperties"]
-    description = entry["properties"][key]["description"]
 
-    assert "only bound" not in description
-    assert "every write" in description and "refused" in description
-    assert "never stands in" in description
-    assert "the type's own range is the only bound" not in config_shape_document()
+    def check_row(_workspace, _patch, key: str, where: str) -> None:
+        entry = config_schema()["properties"]["power_supplies"]["additionalProperties"]
+        if where == "channel":
+            entry = entry["properties"]["channels"]["additionalProperties"]
+        description = entry["properties"][key]["description"]
+
+        assert "only bound" not in description
+        assert "every write" in description and "refused" in description
+        assert "never stands in" in description
+        assert "the type's own range is the only bound" not in config_shape_document()
+
+    rows = combine_parameter_rows(
+        parameter_rows(["voltage_limit_v", "current_limit_a"], ids=['voltage_limit_v', 'current_limit_a']),
+        parameter_rows(["supply", "channel"], ids=['supply', 'channel']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -441,77 +448,83 @@ def test_an_integer_serial_is_registered_as_a_string(tmp_path: Path, monkeypatch
     assert str(values.number) in registered_config_secrets(), "the integer serial was not registered as its str form"
 
 
-@pytest.mark.parametrize("value", [True, 1.5, ["a"], "   "], ids=["bool", "float", "list", "blank"])
-def test_a_value_that_is_not_a_serial_is_not_registered(value: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    values = Values.fresh()
-    kwargs = document(
-        values,
-        com_ports={"psu": port(values.serial, values.resource, drop=("serial_number",))},
-        power_supplies={"bench": supply(idn_serial=value)},
-    )
-    workspace, _ = write_bench(tmp_path, monkeypatch, **kwargs)
-
-    with pytest.raises(ConfigError) as caught:
-        load_authoritative_config(workspace)
-    payload = caught.value.to_dict()
-    assert payload["error_type"] == "config_invalid"
-    assert payload["field"] == "power_supplies.bench.idn_serial"
-
-    from agentic_hil.power_supply import registered_config_secrets
-
-    assert not (spellings_of(value) & registered_config_secrets()), "a malformed idn_serial was registered"
-
-
-@pytest.mark.parametrize("case", REFUSALS, ids=[case.name for case in REFUSALS])
-def test_a_supply_refusal_names_its_field_and_path(case: Refusal, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    values = Values.fresh()
-    workspace, _ = write_bench(tmp_path, monkeypatch, **case.build(values))
-
-    with pytest.raises(ConfigError) as caught:
-        load_authoritative_config(workspace)
-    error = caught.value
-    payload = error.to_dict()
-    assert payload["error_type"] == "config_invalid"
-    assert payload["field"] in case.fields
-    assert payload["path"]
-    if case.secret_field is not None:
-        assert payload["secret_field"] == case.secret_field
-    if case.limit is not None:
-        # AC5: the offending limit is text, and the bound it broke is the record's own text for that bound.
-        quantity, record_key, detail = case.limit
-        expected = POWER_SUPPLY_TYPES["rs3005p"]["ranges"]["1"][quantity][record_key]
-        assert isinstance(payload["value"], str), payload
-        assert payload[detail] == expected, payload
-    # Every value in a new refusal's details is JSON-native: no `default=` is needed to write it.
-    assert json.dumps(payload)
-    for dash in DASHES:
-        assert dash not in str(error)
-
-
-@pytest.mark.parametrize(
-    "value",
-    ["12", True, float("inf"), float("nan"), 0, -1],
-    ids=["string", "bool", "infinity", "nan", "zero", "negative"],
-)
-def test_an_invalid_limit_refuses_the_whole_load(value: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The same malformed value refuses the whole load at each limit: the supply's and the channel's, for both quantities."""
-    places: dict[str, Callable[[Any], dict[str, Any]]] = {
-        "power_supplies.bench.voltage_limit_v": lambda limit: supply(voltage_limit_v=limit),
-        "power_supplies.bench.current_limit_a": lambda limit: supply(current_limit_a=limit),
-        "power_supplies.bench.channels.1.voltage_limit_v": lambda limit: supply(channels={"1": {"voltage_limit_v": limit}}),
-        "power_supplies.bench.channels.1.current_limit_a": lambda limit: supply(channels={"1": {"current_limit_a": limit}}),
-    }
-    values = Values.fresh()
-    for index, (field, place) in enumerate(places.items()):
-        workspace, _ = write_bench(
-            tmp_path / f"case-{index}", monkeypatch, **document(values, power_supplies={"bench": place(value)})
+def test_a_value_that_is_not_a_serial_is_not_registered(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, value: Any) -> None:
+        values = Values.fresh()
+        kwargs = document(
+            values,
+            com_ports={"psu": port(values.serial, values.resource, drop=("serial_number",))},
+            power_supplies={"bench": supply(idn_serial=value)},
         )
+        workspace, _ = write_bench(tmp_path, monkeypatch, **kwargs)
 
         with pytest.raises(ConfigError) as caught:
             load_authoritative_config(workspace)
         payload = caught.value.to_dict()
-        assert payload["error_type"] == "config_invalid", field
-        assert payload["field"] == field, field
+        assert payload["error_type"] == "config_invalid"
+        assert payload["field"] == "power_supplies.bench.idn_serial"
+
+        from agentic_hil.power_supply import registered_config_secrets
+
+        assert not (spellings_of(value) & registered_config_secrets()), "a malformed idn_serial was registered"
+
+    rows = parameter_rows([True, 1.5, ["a"], "   "], ids=["bool", "float", "list", "blank"])
+    check_parameter_rows(tmp_path, rows, check_row)
+
+
+def test_a_supply_refusal_names_its_field_and_path(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, case: Refusal) -> None:
+        values = Values.fresh()
+        workspace, _ = write_bench(tmp_path, monkeypatch, **case.build(values))
+
+        with pytest.raises(ConfigError) as caught:
+            load_authoritative_config(workspace)
+        error = caught.value
+        payload = error.to_dict()
+        assert payload["error_type"] == "config_invalid"
+        assert payload["field"] in case.fields
+        assert payload["path"]
+        if case.secret_field is not None:
+            assert payload["secret_field"] == case.secret_field
+        if case.limit is not None:
+            # AC5: the offending limit is text, and the bound it broke is the record's own text for that bound.
+            quantity, record_key, detail = case.limit
+            expected = POWER_SUPPLY_TYPES["rs3005p"]["ranges"]["1"][quantity][record_key]
+            assert isinstance(payload["value"], str), payload
+            assert payload[detail] == expected, payload
+        # Every value in a new refusal's details is JSON-native: no `default=` is needed to write it.
+        assert json.dumps(payload)
+        for dash in DASHES:
+            assert dash not in str(error)
+
+    rows = parameter_rows(REFUSALS, ids=[case.name for case in REFUSALS])
+    check_parameter_rows(tmp_path, rows, check_row)
+
+
+def test_an_invalid_limit_refuses_the_whole_load(tmp_path: Path) -> None:
+    """The same malformed value refuses the whole load at each limit: the supply's and the channel's, for both quantities."""
+
+    def check_row(tmp_path, monkeypatch, value: Any) -> None:
+        places: dict[str, Callable[[Any], dict[str, Any]]] = {
+            "power_supplies.bench.voltage_limit_v": lambda limit: supply(voltage_limit_v=limit),
+            "power_supplies.bench.current_limit_a": lambda limit: supply(current_limit_a=limit),
+            "power_supplies.bench.channels.1.voltage_limit_v": lambda limit: supply(channels={"1": {"voltage_limit_v": limit}}),
+            "power_supplies.bench.channels.1.current_limit_a": lambda limit: supply(channels={"1": {"current_limit_a": limit}}),
+        }
+        values = Values.fresh()
+        for index, (field, place) in enumerate(places.items()):
+            workspace, _ = write_bench(
+                tmp_path / f"case-{index}", monkeypatch, **document(values, power_supplies={"bench": place(value)})
+            )
+
+            with pytest.raises(ConfigError) as caught:
+                load_authoritative_config(workspace)
+            payload = caught.value.to_dict()
+            assert payload["error_type"] == "config_invalid", field
+            assert payload["field"] == field, field
+
+    rows = parameter_rows(["12", True, float("inf"), float("nan"), 0, -1], ids=["string", "bool", "infinity", "nan", "zero", "negative"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_supply_without_limits_loads_with_none_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

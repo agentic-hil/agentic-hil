@@ -37,6 +37,7 @@ from conftest import (
     write_config,
 )
 from fixtures import fake_openocd
+from parameter_rows import check_parameter_rows, combine_parameter_rows, parameter_rows
 from support import (
     PUBLISH_ATOMICALLY_SOURCE,
     publish_atomically,
@@ -611,8 +612,7 @@ def _place_agent_skill(agent_id: str) -> Path:
     return target
 
 
-@pytest.mark.parametrize(("operator_setting", "handed_an_environment"), [(None, False), (None, True), ("1", False)])
-def test_every_upgrade_child_builds_pyyaml_without_a_compiler(monkeypatch: pytest.MonkeyPatch, operator_setting: str | None, handed_an_environment: bool) -> None:
+def test_every_upgrade_child_builds_pyyaml_without_a_compiler(tmp_path: Path) -> None:
     """The installers' PYYAML_FORCE_LIBYAML=0, on the runner every upgrade command goes through.
 
     `agentic-hil upgrade` runs the same `pip install` and `uv tool upgrade` the
@@ -623,20 +623,25 @@ def test_every_upgrade_child_builds_pyyaml_without_a_compiler(monkeypatch: pytes
     of it, an operator's own value wins, and this process's environment is left
     as it was.
     """
-    from agentic_hil.upgrade import _run_upgrade_process
 
-    if operator_setting is None:
-        monkeypatch.delenv("PYYAML_FORCE_LIBYAML", raising=False)
-    else:
-        monkeypatch.setenv("PYYAML_FORCE_LIBYAML", operator_setting)
-    before = dict(os.environ)
-    command = [sys.executable, "-c", "import os; print(os.environ.get('PYYAML_FORCE_LIBYAML', 'unset'))"]
+    def check_row(_workspace, monkeypatch, operator_setting: str | None, handed_an_environment: bool) -> None:
+        from agentic_hil.upgrade import _run_upgrade_process
 
-    completed = _run_upgrade_process(command, env={**os.environ, "UV_SYSTEM_CERTS": "1"} if handed_an_environment else None)
+        if operator_setting is None:
+            monkeypatch.delenv("PYYAML_FORCE_LIBYAML", raising=False)
+        else:
+            monkeypatch.setenv("PYYAML_FORCE_LIBYAML", operator_setting)
+        before = dict(os.environ)
+        command = [sys.executable, "-c", "import os; print(os.environ.get('PYYAML_FORCE_LIBYAML', 'unset'))"]
 
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == (operator_setting or "0")
-    assert dict(os.environ) == before
+        completed = _run_upgrade_process(command, env={**os.environ, "UV_SYSTEM_CERTS": "1"} if handed_an_environment else None)
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == (operator_setting or "0")
+        assert dict(os.environ) == before
+
+    rows = parameter_rows([(None, False), (None, True), ("1", False)], multiple=True, ids=['None-False', 'None-True', '1-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
@@ -968,9 +973,38 @@ def test_the_pin_refusal_says_whose_words_the_relayed_block_is_before_printing_i
 _RECORDED_INTERPRETER = "/usr/local/bin/python3.12"
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
+def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(tmp_path: Path) -> None:
+    """A recorded `--python` is part of the installation, so the line carries it.
+
+    A reinstall without it resolves an interpreter of uv's own choosing, which is
+    a different installation wearing the same name.
+
+    Both levels are read, `[tool]` first, because uv moved it: current uv writes
+    `python` directly under `[tool]`, and a reader that looked only under
+    `[tool.options]` found nothing on such a receipt. Measured on a bench, where
+    the printed line carried no `--python` at all while the sentence beside it
+    promised to rebuild the installation as it stands.
+    """
+
+    def check_row(tmp_path, monkeypatch, body: str) -> None:
+        _uv_tool_receipt(monkeypatch, tmp_path, body)
+        monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+        _upgrade_reporting(
+            monkeypatch,
+            manager="uv",
+            command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+            installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+            version_after=__version__,
+        )
+
+        result = upgrade_installation([])
+
+        assert result["reinstall_command"] == f'uv tool install --python {_quoted(_RECORDED_INTERPRETER)} "agentic-hil@latest"'
+        assert result["recorded_python"] == _RECORDED_INTERPRETER
+        assert "with_packages" not in result
+        assert f"the interpreter {_RECORDED_INTERPRETER} this installation was created with" in result["summary"]
+
+    rows = parameter_rows([
         pytest.param(
             f'[tool]\nrequirements = [{{ name = "agentic-hil" }}]\n\n[tool.options]\npython = "{_RECORDED_INTERPRETER}"\n',
             id="recorded-under-tool-options",
@@ -983,55 +1017,11 @@ _RECORDED_INTERPRETER = "/usr/local/bin/python3.12"
             f'[tool]\npython = "{_RECORDED_INTERPRETER}"\nrequirements = [{{ name = "agentic-hil" }}]\n\n[tool.options]\npython = ""\n',
             id="recorded-under-tool-beside-an-empty-options-entry",
         ),
-    ],
-)
-def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(
-    body: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A recorded `--python` is part of the installation, so the line carries it.
-
-    A reinstall without it resolves an interpreter of uv's own choosing, which is
-    a different installation wearing the same name.
-
-    Both levels are read, `[tool]` first, because uv moved it: current uv writes
-    `python` directly under `[tool]`, and a reader that looked only under
-    `[tool.options]` found nothing on such a receipt. Measured on a bench, where
-    the printed line carried no `--python` at all while the sentence beside it
-    promised to rebuild the installation as it stands.
-    """
-    _uv_tool_receipt(monkeypatch, tmp_path, body)
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
-    _upgrade_reporting(
-        monkeypatch,
-        manager="uv",
-        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
-        version_after=__version__,
-    )
-
-    result = upgrade_installation([])
-
-    assert result["reinstall_command"] == f'uv tool install --python {_quoted(_RECORDED_INTERPRETER)} "agentic-hil@latest"'
-    assert result["recorded_python"] == _RECORDED_INTERPRETER
-    assert "with_packages" not in result
-    assert f"the interpreter {_RECORDED_INTERPRETER} this installation was created with" in result["summary"]
+    ])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }]\n', id="nothing-recorded-beside-it"),
-        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "x", git = "https://x" }]\n', id="a-source-this-cannot-respell"),
-        pytest.param("this is not toml at all\n", id="a-receipt-that-does-not-parse"),
-    ],
-)
-def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(
-    body: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(tmp_path: Path) -> None:
     """The neighbouring behaviour, unchanged, including where the receipt is unreadable.
 
     A requirement recorded as a git, url or path source does not rebuild into
@@ -1039,22 +1029,31 @@ def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(
     a line that installs something else. It is left out rather than guessed at,
     and the line stays the one this command always printed.
     """
-    _uv_tool_receipt(monkeypatch, tmp_path, body)
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
-    _upgrade_reporting(
-        monkeypatch,
-        manager="uv",
-        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
-        version_after=__version__,
-    )
 
-    result = upgrade_installation([])
+    def check_row(tmp_path, monkeypatch, body: str) -> None:
+        _uv_tool_receipt(monkeypatch, tmp_path, body)
+        monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+        _upgrade_reporting(
+            monkeypatch,
+            manager="uv",
+            command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+            installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+            version_after=__version__,
+        )
 
-    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
-    assert "with_packages" not in result
-    assert "recorded_python" not in result
-    assert "[can]" in result["summary"]
+        result = upgrade_installation([])
+
+        assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+        assert "with_packages" not in result
+        assert "recorded_python" not in result
+        assert "[can]" in result["summary"]
+
+    rows = parameter_rows([
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }]\n', id="nothing-recorded-beside-it"),
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "x", git = "https://x" }]\n', id="a-source-this-cannot-respell"),
+        pytest.param("this is not toml at all\n", id="a-receipt-that-does-not-parse"),
+    ])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(
@@ -1221,9 +1220,39 @@ def test_a_recorded_marker_is_replayed_rather_than_dropped_in_silence(
     assert "with_packages_not_replayed" not in result
 
 
-@pytest.mark.parametrize(
-    ("entry", "requirement", "receipt_key"),
-    [
+def test_a_requirement_the_line_cannot_replay_is_named_rather_than_dropped(tmp_path: Path) -> None:
+    """Two defects with one answer: the silent drop, and the unquoted interpolation.
+
+    A recorded requirement that a `--with` cannot spell without installing
+    something else is still left out of the line, which is right. What was wrong
+    is that nothing said so, under a summary promising the line rebuilds this
+    installation as it stands, so the operator lost the package by following the
+    remediation. And a value that is not a requirement at all used to reach the
+    line as it stood: a recorded name of `pytest" ; echo pwned #` rendered as
+    `uv tool install --with "pytest" ; echo pwned #" "agentic-hil@latest"`.
+    """
+
+    def check_row(tmp_path, monkeypatch, entry: str, requirement: str, receipt_key: str) -> None:
+        _uv_tool_receipt(monkeypatch, tmp_path, f'[tool]\nrequirements = [{{ name = "agentic-hil" }}, {entry}]\n')
+        monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+        _upgrade_reporting(
+            monkeypatch,
+            manager="uv",
+            command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+            installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+            version_after=__version__,
+        )
+
+        result = upgrade_installation([])
+
+        assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+        assert "--with" not in result["reinstall_command"]
+        assert "echo pwned" not in result["reinstall_command"]
+        assert result["with_packages_not_replayed"] == [{"requirement": requirement, "receipt_key": receipt_key}]
+        assert "with_packages" not in result
+        assert requirement in result["summary"] and f"recorded under `{receipt_key}`" in result["summary"]
+
+    rows = parameter_rows([
         pytest.param('{ name = "x", git = "https://example.invalid/x" }', "x", "git", id="a-git-source"),
         pytest.param('{ name = "x", url = "https://example.invalid/x.whl" }', "x", "url", id="a-url-source"),
         pytest.param('{ name = "x", editable = true }', "x", "editable", id="an-editable-source"),
@@ -1236,43 +1265,8 @@ def test_a_recorded_marker_is_replayed_rather_than_dropped_in_silence(
         pytest.param("""{ name = "pytest", marker = "python_version >= '3.10'\\nrm -rf ." }""", "pytest", "marker", id="a-marker-carrying-a-newline"),
         pytest.param('{ name = "pytest", specifier = "==1.0\\n" }', "pytest", "specifier", id="a-specifier-carrying-a-newline"),
         pytest.param('{ name = "pytest", extras = ["a b"] }', "pytest", "extras", id="an-extra-that-is-not-a-name"),
-    ],
-)
-def test_a_requirement_the_line_cannot_replay_is_named_rather_than_dropped(
-    entry: str,
-    requirement: str,
-    receipt_key: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Two defects with one answer: the silent drop, and the unquoted interpolation.
-
-    A recorded requirement that a `--with` cannot spell without installing
-    something else is still left out of the line, which is right. What was wrong
-    is that nothing said so, under a summary promising the line rebuilds this
-    installation as it stands, so the operator lost the package by following the
-    remediation. And a value that is not a requirement at all used to reach the
-    line as it stood: a recorded name of `pytest" ; echo pwned #` rendered as
-    `uv tool install --with "pytest" ; echo pwned #" "agentic-hil@latest"`.
-    """
-    _uv_tool_receipt(monkeypatch, tmp_path, f'[tool]\nrequirements = [{{ name = "agentic-hil" }}, {entry}]\n')
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
-    _upgrade_reporting(
-        monkeypatch,
-        manager="uv",
-        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
-        version_after=__version__,
-    )
-
-    result = upgrade_installation([])
-
-    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
-    assert "--with" not in result["reinstall_command"]
-    assert "echo pwned" not in result["reinstall_command"]
-    assert result["with_packages_not_replayed"] == [{"requirement": requirement, "receipt_key": receipt_key}]
-    assert "with_packages" not in result
-    assert requirement in result["summary"] and f"recorded under `{receipt_key}`" in result["summary"]
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_no_receipt_is_read_for_an_installation_uv_tool_does_not_own(
@@ -1431,21 +1425,7 @@ def test_a_recorded_exact_requirement_is_read_off_the_receipt_as_well(
     assert entrypoint(["upgrade", "--json"]) == 1
 
 
-@pytest.mark.parametrize(
-    "specifier",
-    [
-        pytest.param(">=0.21", id="the-floor-the-quickstart-recommends"),
-        pytest.param("~=0.21.0", id="a-compatible-release-clause"),
-        pytest.param("<1.0", id="a-ceiling"),
-        pytest.param(">=0.21,<0.22", id="a-range"),
-        pytest.param("!=0.21.1", id="an-exclusion"),
-    ],
-)
-def test_a_recorded_floor_is_never_reported_as_holding_a_release_back(
-    specifier: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_a_recorded_floor_is_never_reported_as_holding_a_release_back(tmp_path: Path) -> None:
     """The reported defect: an installation's own `>=` was named as its blocker.
 
     `uv tool install "agentic-hil[can]>=0.21"` is the line AI_AGENT_QUICKSTART.md
@@ -1457,24 +1437,35 @@ def test_a_recorded_floor_is_never_reported_as_holding_a_release_back(
     the branch that states both numbers and invents no cause, which is `ok: true`
     and exit 0.
     """
-    _uv_tool_receipt(
-        monkeypatch,
-        tmp_path,
-        f'[tool]\nrequirements = [{{ name = "agentic-hil", specifier = "{specifier}" }}]\n',
-    )
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
-    _nothing_to_upgrade(monkeypatch)
-    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
 
-    result = upgrade_installation([])
+    def check_row(tmp_path, monkeypatch, specifier: str) -> None:
+        _uv_tool_receipt(
+            monkeypatch,
+            tmp_path,
+            f'[tool]\nrequirements = [{{ name = "agentic-hil", specifier = "{specifier}" }}]\n',
+        )
+        monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+        _nothing_to_upgrade(monkeypatch)
+        monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
 
-    assert result["ok"] is True
-    assert "error_type" not in result
-    assert "held_back_by" not in result
-    assert "already_current" not in result
-    assert result["newest_release"] == "9.9.9"
-    assert specifier not in result["summary"]
-    assert entrypoint(["upgrade", "--json"]) == 0
+        result = upgrade_installation([])
+
+        assert result["ok"] is True
+        assert "error_type" not in result
+        assert "held_back_by" not in result
+        assert "already_current" not in result
+        assert result["newest_release"] == "9.9.9"
+        assert specifier not in result["summary"]
+        assert entrypoint(["upgrade", "--json"]) == 0
+
+    rows = parameter_rows([
+        pytest.param(">=0.21", id="the-floor-the-quickstart-recommends"),
+        pytest.param("~=0.21.0", id="a-compatible-release-clause"),
+        pytest.param("<1.0", id="a-ceiling"),
+        pytest.param(">=0.21,<0.22", id="a-range"),
+        pytest.param("!=0.21.1", id="an-exclusion"),
+    ])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_recorded_option_still_holds_a_release_back_beside_a_floor(
@@ -1590,23 +1581,20 @@ def test_an_upgrade_that_moved_the_installation_says_nothing_about_the_index(
     assert "newest_release" not in result
 
 
-@pytest.mark.parametrize(
-    ("payload", "expected"),
-    [
+def test_the_index_reader_answers_only_what_the_payload_states(tmp_path: Path) -> None:
+    """One request, and anything it cannot read is None rather than a guess."""
+
+    def check_row(_workspace, monkeypatch, payload: bytes, expected: str | None) -> None:
+        monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: _FakeIndexResponse(payload))
+
+        assert read_the_release_index() == expected
+
+    rows = parameter_rows([
         pytest.param(b'{"info": {"version": " 1.2.3 "}}', "1.2.3", id="the-version-the-index-publishes"),
         pytest.param(b'{"info": {}}', None, id="a-payload-without-one"),
         pytest.param(b"not json", None, id="a-payload-that-does-not-parse"),
-    ],
-)
-def test_the_index_reader_answers_only_what_the_payload_states(
-    payload: bytes,
-    expected: str | None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One request, and anything it cannot read is None rather than a guess."""
-    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: _FakeIndexResponse(payload))
-
-    assert read_the_release_index() == expected
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 class _FakeIndexResponse:
@@ -2333,34 +2321,32 @@ def test_the_uv_pip_route_is_short_circuited_by_its_own_dry_run(
     assert calls[0][0] == [*UV_PIP_UPGRADE_COMMAND, "--dry-run"]
 
 
-@pytest.mark.parametrize(
-    "unreadable",
-    [
-        subprocess.CompletedProcess[str]([], 2, "", "no such option: --report"),
-        subprocess.CompletedProcess[str]([], 0, "not json at all", ""),
-        subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1"}), ""),
-    ],
-)
-def test_a_resolution_this_program_cannot_read_upgrades_exactly_as_before(
-    unreadable: subprocess.CompletedProcess[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_resolution_this_program_cannot_read_upgrades_exactly_as_before(tmp_path: Path) -> None:
     """An old pip, a changed report, a query that failed: none of them is an answer.
 
     The check exists to stop an upgrade that has nothing to do, never to invent
     one. Anything it cannot read falls through to the upgrade this command
     always ran, so a machine with a pip too old for `--report` is slower to
     answer and never wrong."""
-    _recording_manager(
-        monkeypatch,
-        answers={"resolution": unreadable, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
-    )
 
-    result = upgrade_installation([])
+    def check_row(_workspace, monkeypatch, unreadable: subprocess.CompletedProcess[str]) -> None:
+        _recording_manager(
+            monkeypatch,
+            answers={"resolution": unreadable, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+        )
 
-    assert result["ok"] is True
-    assert result["upgraded_on_disk"] is True
-    assert result["version"] == "9.9.9"
+        result = upgrade_installation([])
+
+        assert result["ok"] is True
+        assert result["upgraded_on_disk"] is True
+        assert result["version"] == "9.9.9"
+
+    rows = parameter_rows([
+        subprocess.CompletedProcess[str]([], 2, "", "no such option: --report"),
+        subprocess.CompletedProcess[str]([], 0, "not json at all", ""),
+        subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1"}), ""),
+    ], ids=['unreadable0', 'unreadable1', 'unreadable2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -2907,21 +2893,7 @@ def test_a_registration_that_was_already_current_asks_for_no_restart(
     assert "restart opencode" not in result["summary"]
 
 
-@pytest.mark.parametrize(
-    ("manager", "command", "expected"),
-    [
-        ("uv", ["uv.exe", "tool", "upgrade", "agentic-hil"], 'uv tool install "agentic-hil[can]@latest"'),
-        ("pipx", ["pipx.exe", "upgrade", "agentic-hil"], 'pipx install --force "agentic-hil[can]"'),
-        ("uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil[can]"], None),
-        ("pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil[can]"], None),
-    ],
-)
-def test_the_command_that_clears_a_pin_exists_only_where_a_pin_can_be_recorded(
-    manager: str,
-    command: list[str],
-    expected: str | None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_command_that_clears_a_pin_exists_only_where_a_pin_can_be_recorded(tmp_path: Path) -> None:
     """Only `uv tool` and `pipx` reinstall from a requirement of their own.
 
     The `uv pip` and `pip` paths take the requirement from the command line this
@@ -2929,11 +2901,21 @@ def test_the_command_that_clears_a_pin_exists_only_where_a_pin_can_be_recorded(
     and none is invented. A pin nobody can name a fix for is reported as the
     plain unchanged outcome, never as advice that does not exist.
     """
-    from agentic_hil.upgrade import _unpinned_reinstall_command
 
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    def check_row(_workspace, monkeypatch, manager: str, command: list[str], expected: str | None) -> None:
+        from agentic_hil.upgrade import _unpinned_reinstall_command
 
-    assert _unpinned_reinstall_command(manager, command) == expected
+        monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+
+        assert _unpinned_reinstall_command(manager, command) == expected
+
+    rows = parameter_rows([
+        ("uv", ["uv.exe", "tool", "upgrade", "agentic-hil"], 'uv tool install "agentic-hil[can]@latest"'),
+        ("pipx", ["pipx.exe", "upgrade", "agentic-hil"], 'pipx install --force "agentic-hil[can]"'),
+        ("uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil[can]"], None),
+        ("pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil[can]"], None),
+    ], multiple=True, ids=['uv-command0-uv tool install "agentic-hil[can]@latest"', 'pipx-command1-pipx install --force "agentic-hil[can]"', 'uv-command2-None', 'pip-command3-None'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_upgrade_rejects_unknown_agent_before_mutating_installation(
@@ -2947,34 +2929,28 @@ def test_upgrade_rejects_unknown_agent_before_mutating_installation(
     assert result["error_type"] == "unsupported_agent"
 
 
-@pytest.mark.parametrize(
-    ("prefix", "installer", "manager", "expected"),
-    [
+def test_upgrade_selects_manager_owning_running_installation(tmp_path: Path) -> None:
+    def check_row(_workspace, monkeypatch, prefix: str, installer: str, manager: str, expected: list[str]) -> None:
+        from agentic_hil.upgrade import _upgrade_command
+
+        monkeypatch.setattr(sys, "prefix", prefix)
+        monkeypatch.setattr(sys, "executable", "PYTHON")
+        monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: installer)
+        monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+        monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: f"{name}.exe")
+
+        selected_manager, command = _upgrade_command()
+
+        assert selected_manager == manager
+        assert command == expected
+
+    rows = parameter_rows([
         ("C:/Users/op/AppData/Roaming/uv/tools/agentic-hil", "uv", "uv", ["uv.exe", "tool", "upgrade", "agentic-hil"]),
         ("C:/Users/op/.local/pipx/venvs/agentic-hil", "pip", "pipx", ["pipx.exe", "upgrade", "agentic-hil"]),
         ("C:/Users/op/venv", "uv", "uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil"]),
         ("C:/Python313", "pip", "pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil"]),
-    ],
-)
-def test_upgrade_selects_manager_owning_running_installation(
-    prefix: str,
-    installer: str,
-    manager: str,
-    expected: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agentic_hil.upgrade import _upgrade_command
-
-    monkeypatch.setattr(sys, "prefix", prefix)
-    monkeypatch.setattr(sys, "executable", "PYTHON")
-    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: installer)
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
-    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: f"{name}.exe")
-
-    selected_manager, command = _upgrade_command()
-
-    assert selected_manager == manager
-    assert command == expected
+    ], multiple=True, ids=['C:/Users/op/AppData/Roaming/uv/tools/agentic-hil-uv-uv-expected0', 'C:/Users/op/.local/pipx/venvs/agentic-hil-pip-pipx-expected1', 'C:/Users/op/venv-uv-uv-expected2', 'C:/Python313-pip-pip-expected3'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # The receipt of an installation created with an exact requirement, in the shape
@@ -3242,21 +3218,7 @@ def test_a_prefix_that_refuses_to_be_listed_is_not_read_as_having_no_receipt(
         environment.chmod(0o700)
 
 
-@pytest.mark.parametrize(
-    ("prefix", "installer", "expected"),
-    [
-        ("C:/Users/op/AppData/Roaming/uv/tools/agentic-hil", "uv", "uv tool uninstall agentic-hil"),
-        ("C:/Users/op/.local/pipx/venvs/agentic-hil", "pip", "pipx uninstall agentic-hil"),
-        ("C:/Users/op/venv", "uv", 'uv pip uninstall --python "PYTHON" agentic-hil'),
-        ("C:/Python313", "pip", '"PYTHON" -m pip uninstall agentic-hil'),
-    ],
-)
-def test_the_removal_line_comes_from_the_manager_that_owns_the_installation(
-    prefix: str,
-    installer: str,
-    expected: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_removal_line_comes_from_the_manager_that_owns_the_installation(tmp_path: Path) -> None:
     """`uninstall` ends on this line, and it has to name the same manager an
     upgrade would have run.
 
@@ -3266,15 +3228,25 @@ def test_the_removal_line_comes_from_the_manager_that_owns_the_installation(
     right now says nothing about whether the operator will have one when they
     run it. No extras either, because a removal takes the distribution whole.
     """
-    from agentic_hil.upgrade import removal_command
 
-    monkeypatch.setattr(sys, "prefix", prefix)
-    monkeypatch.setattr(sys, "executable", "PYTHON")
-    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: installer)
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can", "pyocd"))
-    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda _name: pytest.fail("a line to print needs no manager on PATH"))
+    def check_row(_workspace, monkeypatch, prefix: str, installer: str, expected: str) -> None:
+        from agentic_hil.upgrade import removal_command
 
-    assert removal_command() == expected
+        monkeypatch.setattr(sys, "prefix", prefix)
+        monkeypatch.setattr(sys, "executable", "PYTHON")
+        monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: installer)
+        monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can", "pyocd"))
+        monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda _name: pytest.fail("a line to print needs no manager on PATH"))
+
+        assert removal_command() == expected
+
+    rows = parameter_rows([
+        ("C:/Users/op/AppData/Roaming/uv/tools/agentic-hil", "uv", "uv tool uninstall agentic-hil"),
+        ("C:/Users/op/.local/pipx/venvs/agentic-hil", "pip", "pipx uninstall agentic-hil"),
+        ("C:/Users/op/venv", "uv", 'uv pip uninstall --python "PYTHON" agentic-hil'),
+        ("C:/Python313", "pip", '"PYTHON" -m pip uninstall agentic-hil'),
+    ], multiple=True, ids=['C:/Users/op/AppData/Roaming/uv/tools/agentic-hil-uv-uv tool uninstall agentic-hil', 'C:/Users/op/.local/pipx/venvs/agentic-hil-pip-pipx uninstall agentic-hil', 'C:/Users/op/venv-uv-uv pip uninstall --python "PYTHON" agentic-hil', 'C:/Python313-pip-"PYTHON" -m pip uninstall agentic-hil'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(
@@ -4481,16 +4453,7 @@ def test_a_pipx_installation_with_no_pin_still_upgrades(
     assert "pinned_version" not in result
 
 
-@pytest.mark.parametrize(
-    ("output", "pinned"),
-    [
-        (_PIPX_PIN_REFUSAL, True),
-        (_UV_EXACT_PIN_HINT, True),
-        ("Nothing to upgrade\n", False),
-        ("installed\n", False),
-    ],
-)
-def test_the_pin_is_read_out_of_either_managers_own_words(output: str, pinned: bool) -> None:
+def test_the_pin_is_read_out_of_either_managers_own_words(tmp_path: Path) -> None:
     """One reader for both managers, and neither wording taken from the other.
 
     uv writes `is pinned to ... (installed with an exact version pin)`, pipx
@@ -4498,9 +4461,19 @@ def test_the_pin_is_read_out_of_either_managers_own_words(output: str, pinned: b
     no pin held. Reading uv's two phrases alone is what left every pipx pin with
     no path to a refusal at all.
     """
-    from agentic_hil.upgrade import _manager_reports_exact_pin
 
-    assert _manager_reports_exact_pin({"stdout": "", "stderr": output}) is pinned
+    def check_row(_workspace, _patch, output: str, pinned: bool) -> None:
+        from agentic_hil.upgrade import _manager_reports_exact_pin
+
+        assert _manager_reports_exact_pin({"stdout": "", "stderr": output}) is pinned
+
+    rows = parameter_rows([
+        (_PIPX_PIN_REFUSAL, True),
+        (_UV_EXACT_PIN_HINT, True),
+        ("Nothing to upgrade\n", False),
+        ("installed\n", False),
+    ], multiple=True, ids=['Not upgrading pinned package agentic-hil. Run `pipx unpin agentic-hil` to unpin it.-True', 'hint: `agentic-hil` is pinned to `0.7.1` (installed with an exact version pin); reinstall with `uv tool install agentic-hil@latest` to upgrade to a new version.-True', 'Nothing to upgrade\\n-False', 'installed\\n-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def _table_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7025,8 +6998,7 @@ def test_doctor_names_a_placeholder_debugger_beside_a_bound_one(tmp_path: Path, 
     assert "no test plan can run" not in binding["summary"]
 
 
-@pytest.mark.parametrize(("debugger_type", "program"), [("openocd", "openocd"), ("pyocd", "pyocd"), ("stlink", "STM32_Programmer_CLI"), ("esptool", "esptool")])
-def test_a_placeholder_debugger_stays_one_whatever_the_host_has_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, debugger_type: str, program: str) -> None:
+def test_a_placeholder_debugger_stays_one_whatever_the_host_has_installed(tmp_path: Path) -> None:
     """The test above, on a machine that has the toolchain on PATH.
 
     Pinning fills an entry that names no executable from the host, which is
@@ -7037,25 +7009,30 @@ def test_a_placeholder_debugger_stays_one_whatever_the_host_has_installed(tmp_pa
     CI failed there. The program pinning looks for is put first on PATH here,
     and the entry is still the placeholder the suite wrote.
     """
-    toolchain = tmp_path / "toolchain"
-    toolchain.mkdir()
-    stub = toolchain / (f"{program}.exe" if os.name == "nt" else program)
-    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    stub.chmod(0o755)
-    monkeypatch.setenv("PATH", str(toolchain) + os.pathsep + os.environ.get("PATH", ""))
-    workspace = tmp_path / "workspace"
-    # An esptool entry names the serial line it reaches the board through, bound or not.
-    serial = "    com_port: esp\n" if debugger_type == "esptool" else ""
-    write_authoritative_config(
-        workspace,
-        monkeypatch,
-        debuggers_yaml=f"debuggers:\n  spare:\n    type: {debugger_type}\n    executable: null\n    probe_id: null\n{serial}",
-        com_ports_yaml=ESPTOOL_COM_PORTS_YAML if serial else "com_ports: {}\n",
-    )
 
-    spare = load_authoritative_config(workspace).debuggers["spare"]
+    def check_row(tmp_path, monkeypatch, debugger_type: str, program: str) -> None:
+        toolchain = tmp_path / "toolchain"
+        toolchain.mkdir()
+        stub = toolchain / (f"{program}.exe" if os.name == "nt" else program)
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", str(toolchain) + os.pathsep + os.environ.get("PATH", ""))
+        workspace = tmp_path / "workspace"
+        # An esptool entry names the serial line it reaches the board through, bound or not.
+        serial = "    com_port: esp\n" if debugger_type == "esptool" else ""
+        write_authoritative_config(
+            workspace,
+            monkeypatch,
+            debuggers_yaml=f"debuggers:\n  spare:\n    type: {debugger_type}\n    executable: null\n    probe_id: null\n{serial}",
+            com_ports_yaml=ESPTOOL_COM_PORTS_YAML if serial else "com_ports: {}\n",
+        )
 
-    assert debugger_is_placeholder(spare), spare.executable
+        spare = load_authoritative_config(workspace).debuggers["spare"]
+
+        assert debugger_is_placeholder(spare), spare.executable
+
+    rows = parameter_rows([("openocd", "openocd"), ("pyocd", "pyocd"), ("stlink", "STM32_Programmer_CLI"), ("esptool", "esptool")], multiple=True, ids=['openocd-openocd', 'pyocd-pyocd', 'stlink-STM32_Programmer_CLI', 'esptool-esptool'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_troubleshooting_describes_the_unbound_doctor_the_way_it_behaves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7139,71 +7116,94 @@ def test_mcp_config_force_rejects_alias_without_changing_victim(
     assert victim.read_text(encoding="utf-8") == existing
 
 
-@pytest.mark.parametrize(
-    "existing",
-    [
+def test_register_agent_mcp_codex_reports_semantic_unmanaged_entry_conflict(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, existing: str) -> None:
+        _isolated_workspace(tmp_path, monkeypatch)
+        home = _isolated_home(tmp_path, monkeypatch)
+        _trusted_test_mcp_command(monkeypatch)
+        path = home / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text(existing, encoding="utf-8")
+
+        result = register_agent_mcp("codex")
+
+        assert result["ok"] is False
+        assert result["error_type"] == "mcp_config_conflict"
+        assert path.read_text(encoding="utf-8") == existing
+
+    rows = parameter_rows([
         '[mcp_servers."agentic-hil"]\ncommand = "custom"\n',
         '[mcp_servers]\n"agentic-hil" = { command = "custom" }\n',
         'mcp_servers = { "agentic-hil" = { command = "custom" } }\n',
-    ],
-    ids=["quoted-table", "parent-table", "top-level-inline-table"],
-)
-def test_register_agent_mcp_codex_reports_semantic_unmanaged_entry_conflict(
-    existing: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _isolated_workspace(tmp_path, monkeypatch)
-    home = _isolated_home(tmp_path, monkeypatch)
-    _trusted_test_mcp_command(monkeypatch)
-    path = home / ".codex" / "config.toml"
-    path.parent.mkdir(parents=True)
-    path.write_text(existing, encoding="utf-8")
-
-    result = register_agent_mcp("codex")
-
-    assert result["ok"] is False
-    assert result["error_type"] == "mcp_config_conflict"
-    assert path.read_text(encoding="utf-8") == existing
+    ], ids=["quoted-table", "parent-table", "top-level-inline-table"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
-def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(
-    agent: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(tmp_path: Path) -> None:
     """A refusal that only named the obstacle was read as a task to clear it.
 
     Measured: ten runs hand-edited the operator's entry to the path setup had
     reported, reran setup with --force, and reported success.
     """
-    from evals.install.fixtures import agent_config_path, fixture_content
 
-    _isolated_workspace(tmp_path, monkeypatch)
-    home = _isolated_home(tmp_path, monkeypatch)
-    _trusted_test_mcp_command(monkeypatch)
-    path = agent_config_path(agent, home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    seeded = fixture_content(agent, "unsafe-existing-config")
-    assert seeded is not None
-    path.write_text(seeded, encoding="utf-8")
+    def check_row(tmp_path, monkeypatch, agent: str) -> None:
+        from evals.install.fixtures import agent_config_path, fixture_content
 
-    result = register_agent_mcp(agent, force=True)
+        _isolated_workspace(tmp_path, monkeypatch)
+        home = _isolated_home(tmp_path, monkeypatch)
+        _trusted_test_mcp_command(monkeypatch)
+        path = agent_config_path(agent, home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        seeded = fixture_content(agent, "unsafe-existing-config")
+        assert seeded is not None
+        path.write_text(seeded, encoding="utf-8")
 
-    assert result["error_type"] == "mcp_config_conflict"
-    assert path.read_text(encoding="utf-8") == seeded
-    step = result["next_step"]
-    assert "belongs to the operator" in step
-    assert "--force does not apply" in step
-    assert "Report it" in step
-    # The wording that once taught a model to rewrite the file must not return.
-    assert "ask the operator to change" not in step.lower()
+        result = register_agent_mcp(agent, force=True)
+
+        assert result["error_type"] == "mcp_config_conflict"
+        assert path.read_text(encoding="utf-8") == seeded
+        step = result["next_step"]
+        assert "belongs to the operator" in step
+        assert "--force does not apply" in step
+        assert "Report it" in step
+        # The wording that once taught a model to rewrite the file must not return.
+        assert "ask the operator to change" not in step.lower()
+
+    rows = parameter_rows(["codex", "claude-code", "opencode"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("agent", "relative_path", "existing", "expected_command"),
-    [
+def test_a_foreign_mcp_entry_refusal_names_the_command_it_found(tmp_path: Path) -> None:
+    """The file alone does not say whose entry this is; the command does.
+
+    An operator reading only the path cannot tell their own deliberate wrapper
+    from an entry an older release wrote whose launcher has since moved.
+    Answering that took a hand-written JSON read of their own agent config, so
+    the refusal carries the configured command, in the shape the format stores
+    it: a string for Codex and Claude, opencode's list as it stands.
+    """
+
+    def check_row(tmp_path, monkeypatch, agent: str, relative_path: Path, existing: str, expected_command: object) -> None:
+        _isolated_workspace(tmp_path, monkeypatch)
+        home = _isolated_home(tmp_path, monkeypatch)
+        _trusted_test_mcp_command(monkeypatch)
+        path = home / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(existing, encoding="utf-8")
+
+        result = register_agent_mcp(agent, force=True)
+
+        assert result["error_type"] == "mcp_config_conflict"
+        assert result["existing_command"] == expected_command
+        assert path.read_text(encoding="utf-8") == existing
+        # Naming the command must stay reporting. The sentence that measured out the
+        # rewrites says the conflict is the answer, and it says nothing about the
+        # entry's command, which is what an agent would read as a thing to act on.
+        step = result["next_step"]
+        assert "This conflict is the answer to the request" in step
+        assert "/operator/wrapper.sh" not in step
+
+    rows = parameter_rows([
         (
             "codex",
             Path(".codex/config.toml"),
@@ -7222,42 +7222,8 @@ def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(
             '{"mcp": {"agentic-hil": {"type": "local", "command": ["/operator/wrapper.sh", "--profile", "bench"], "enabled": true}}}',
             ["/operator/wrapper.sh", "--profile", "bench"],
         ),
-    ],
-)
-def test_a_foreign_mcp_entry_refusal_names_the_command_it_found(
-    agent: str,
-    relative_path: Path,
-    existing: str,
-    expected_command: object,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The file alone does not say whose entry this is; the command does.
-
-    An operator reading only the path cannot tell their own deliberate wrapper
-    from an entry an older release wrote whose launcher has since moved.
-    Answering that took a hand-written JSON read of their own agent config, so
-    the refusal carries the configured command, in the shape the format stores
-    it: a string for Codex and Claude, opencode's list as it stands.
-    """
-    _isolated_workspace(tmp_path, monkeypatch)
-    home = _isolated_home(tmp_path, monkeypatch)
-    _trusted_test_mcp_command(monkeypatch)
-    path = home / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(existing, encoding="utf-8")
-
-    result = register_agent_mcp(agent, force=True)
-
-    assert result["error_type"] == "mcp_config_conflict"
-    assert result["existing_command"] == expected_command
-    assert path.read_text(encoding="utf-8") == existing
-    # Naming the command must stay reporting. The sentence that measured out the
-    # rewrites says the conflict is the answer, and it says nothing about the
-    # entry's command, which is what an agent would read as a thing to act on.
-    step = result["next_step"]
-    assert "This conflict is the answer to the request" in step
-    assert "/operator/wrapper.sh" not in step
+    ], multiple=True, ids=['codex-relative_path0-[mcp_servers.agentic-hil]\\ncommand = "/operator/wrapper.sh"\\nargs = []\\n-/operator/wrapper.sh', 'claude-code-relative_path1-{"mcpServers": {"agentic-hil": {"type": "stdio", "command": "/operator/wrapper.sh", "args": []}}}-/operator/wrapper.sh', 'opencode-relative_path2-{"mcp": {"agentic-hil": {"type": "local", "command": ["/operator/wrapper.sh", "--profile", "bench"], "enabled": true}}}-expected_command2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_foreign_mcp_entry_refusal_omits_a_command_it_cannot_name(
@@ -7958,12 +7924,7 @@ def test_uninstall_takes_back_the_two_halves_the_machine_install_wrote(
     assert [item["what"] for item in result["removed"]] == ["MCP registration", "agent skill"]
 
 
-@pytest.mark.parametrize("where", ["home", "filesystem-root", "project"])
-def test_uninstall_runs_wherever_agent_install_runs(
-    where: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_uninstall_runs_wherever_agent_install_runs(tmp_path: Path) -> None:
     """Same boundary as the half it takes back, and for the same reason (#235).
 
     Everything it writes is user-level, so the working directory that would
@@ -7971,17 +7932,22 @@ def test_uninstall_runs_wherever_agent_install_runs(
     A project directory keeps the strict rule and is the other place an operator
     types this.
     """
-    project = _isolated_workspace(tmp_path, monkeypatch)
-    home = _isolated_home(tmp_path, monkeypatch)
-    _trusted_test_mcp_command(monkeypatch)
-    assert install_agent(agent="claude-code")["ok"] is True
-    monkeypatch.chdir({"home": home, "filesystem-root": Path(home.anchor), "project": project}[where])
 
-    result = uninstall_agent_integration(["claude-code"])
+    def check_row(tmp_path, monkeypatch, where: str) -> None:
+        project = _isolated_workspace(tmp_path, monkeypatch)
+        home = _isolated_home(tmp_path, monkeypatch)
+        _trusted_test_mcp_command(monkeypatch)
+        assert install_agent(agent="claude-code")["ok"] is True
+        monkeypatch.chdir({"home": home, "filesystem-root": Path(home.anchor), "project": project}[where])
 
-    assert result["ok"] is True, result
-    assert not _claude_skill_path().exists()
-    assert _registered_claude_command() is None
+        result = uninstall_agent_integration(["claude-code"])
+
+        assert result["ok"] is True, result
+        assert not _claude_skill_path().exists()
+        assert _registered_claude_command() is None
+
+    rows = parameter_rows(["home", "filesystem-root", "project"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_uninstall_leaves_an_mcp_entry_the_operator_wrote(
@@ -9329,18 +9295,18 @@ def test_register_agent_mcp_migrates_managed_workspace_command_without_force(
     assert migrated == command or migrated == [command, "mcp-stdio"]
 
 
-@pytest.mark.parametrize("command", ["agentic-hil", "bin/agentic-hil", "uvx"])
-def test_register_agent_mcp_rejects_non_absolute_injected_command(
-    command: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = Path.home() / ".claude.json"
+def test_register_agent_mcp_rejects_non_absolute_injected_command(tmp_path: Path) -> None:
+    def check_row(_workspace, monkeypatch, command: str) -> None:
+        path = Path.home() / ".claude.json"
 
-    with pytest.raises(ConfigError) as excinfo:
-        register_agent_mcp("claude-code", command=command)
+        with pytest.raises(ConfigError) as excinfo:
+            register_agent_mcp("claude-code", command=command)
 
-    assert excinfo.value.error_type == "mcp_command_untrusted"
-    assert not path.exists()
+        assert excinfo.value.error_type == "mcp_command_untrusted"
+        assert not path.exists()
+
+    rows = parameter_rows(["agentic-hil", "bin/agentic-hil", "uvx"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_register_agent_mcp_rejects_workspace_injected_command(
@@ -9561,9 +9527,7 @@ UBUNTU_USERS = {1001: ("alice", 1001)}
 UBUNTU_GROUPS = {1001: ("alice", 1001, [])}
 
 
-@pytest.mark.parametrize("mode", [0o775, 0o777, 0o1777, 0o755])
-@pytest.mark.parametrize("final", [True, False])
-def test_a_launcher_ancestor_is_no_longer_untrusted_for_who_else_may_write_it(mode: int, final: bool) -> None:
+def test_a_launcher_ancestor_is_no_longer_untrusted_for_who_else_may_write_it(tmp_path: Path) -> None:
     """The refusal that made an ordinary user-local installation unregisterable.
 
     `~` or `~/.local` at `0775` is what a distribution combining `umask 002`
@@ -9574,7 +9538,15 @@ def test_a_launcher_ancestor_is_no_longer_untrusted_for_who_else_may_write_it(mo
     or not, at any depth: the same detect-rather-than-prevent line Windows has
     held since its ACL walk was removed in 0.8.0.
     """
-    assert untrusted_launcher_directory(_directory_stat(mode, 1000), final=final, trusted_uids=frozenset({0, 1000})) is None
+
+    def check_row(_workspace, _patch, final: bool, mode: int) -> None:
+        assert untrusted_launcher_directory(_directory_stat(mode, 1000), final=final, trusted_uids=frozenset({0, 1000})) is None
+
+    rows = combine_parameter_rows(
+        parameter_rows([True, False], ids=['True', 'False']),
+        parameter_rows([0o775, 0o777, 0o1777, 0o755], ids=['509', '511', '1023', '493']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_the_launchers_own_parent_must_still_belong_to_root_or_this_user(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -10385,9 +10357,20 @@ def test_openocd_probe_listing_says_so_when_the_inventory_cannot_be_read(tmp_pat
     assert result["target_contacted"] is False
 
 
-@pytest.mark.parametrize(
-    ("interface_cfg", "enumerated"),
-    [
+def test_the_interface_script_decides_whether_a_probe_can_be_enumerated(tmp_path: Path) -> None:
+    """The rule reads the script's own name, both separators, either case.
+
+    A Windows configuration writes forward slashes by convention and backslashes
+    by accident, and an operator may name an absolute path to a script of their
+    own; none of that may change which adapter the entry is understood to name.
+    """
+
+    def check_row(_workspace, _patch, interface_cfg: str, enumerated: bool) -> None:
+        from agentic_hil.backends.openocd import openocd_interface_enumerates_by_usb
+
+        assert openocd_interface_enumerates_by_usb(interface_cfg) is enumerated
+
+    rows = parameter_rows([
         ("interface/stlink.cfg", True),
         ("interface/stlink-dap.cfg", True),
         ("interface/stlink-v2-1.cfg", True),
@@ -10398,18 +10381,8 @@ def test_openocd_probe_listing_says_so_when_the_inventory_cannot_be_read(tmp_pat
         ("interface/cmsis-dap.cfg", False),
         ("interface/ftdi/olimex-arm-usb-ocd.cfg", False),
         ("", False),
-    ],
-)
-def test_the_interface_script_decides_whether_a_probe_can_be_enumerated(interface_cfg: str, enumerated: bool) -> None:
-    """The rule reads the script's own name, both separators, either case.
-
-    A Windows configuration writes forward slashes by convention and backslashes
-    by accident, and an operator may name an absolute path to a script of their
-    own; none of that may change which adapter the entry is understood to name.
-    """
-    from agentic_hil.backends.openocd import openocd_interface_enumerates_by_usb
-
-    assert openocd_interface_enumerates_by_usb(interface_cfg) is enumerated
+    ], multiple=True, ids=['interface/stlink.cfg-True', 'interface/stlink-dap.cfg-True', 'interface/stlink-v2-1.cfg-True', 'C:/openocd/share/openocd/scripts/interface/stlink.cfg-True', 'C:\\\\openocd\\\\scripts\\\\interface\\\\stlink.cfg-True', 'interface/STLINK.CFG-True', 'interface/jlink.cfg-False', 'interface/cmsis-dap.cfg-False', 'interface/ftdi/olimex-arm-usb-ocd.cfg-False', '-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_stlink_lists_all_connected_probe_ids(tmp_path: Path) -> None:
@@ -10541,8 +10514,7 @@ OPENOCD_RESET_COMMANDS = {
 }
 
 
-@pytest.mark.parametrize("mode", ["run", "halt", "init"])
-def test_openocd_reset_sends_init_before_reset_in_every_mode(tmp_path: Path, mode: str) -> None:
+def test_openocd_reset_sends_init_before_reset_in_every_mode(tmp_path: Path) -> None:
     """The command line itself, not just the result.
 
     0.7.0 sent `reset <mode>` with no `init`, which OpenOCD refuses with
@@ -10550,17 +10522,22 @@ def test_openocd_reset_sends_init_before_reset_in_every_mode(tmp_path: Path, mod
     at what was sent. `init; reset init` is two different things in one line: the
     server leaving its configuration stage, then OpenOCD's reset-init mode - the
     same pair OpenOCD's own `program` proc issues."""
-    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
-    try:
-        result = mcp_tool_call(service, "reset_target", {"mode": mode})
-    finally:
-        service.close()
 
-    assert openocd_backend.openocd_reset_command(mode, "AGENTIC_HIL_RESULT:reset_target:ok") == OPENOCD_RESET_COMMANDS[mode]
-    assert result["ok"] is True, result
-    assert result["success_confirmed"] is True
-    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
-    assert logged.endswith(command_for_log(["-c", OPENOCD_RESET_COMMANDS[mode]]))
+    def check_row(tmp_path, _patch, mode: str) -> None:
+        service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+        try:
+            result = mcp_tool_call(service, "reset_target", {"mode": mode})
+        finally:
+            service.close()
+
+        assert openocd_backend.openocd_reset_command(mode, "AGENTIC_HIL_RESULT:reset_target:ok") == OPENOCD_RESET_COMMANDS[mode]
+        assert result["ok"] is True, result
+        assert result["success_confirmed"] is True
+        logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+        assert logged.endswith(command_for_log(["-c", OPENOCD_RESET_COMMANDS[mode]]))
+
+    rows = parameter_rows(["run", "halt", "init"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_openocd_probe_sends_init_before_the_target_query(tmp_path: Path) -> None:
@@ -10924,52 +10901,54 @@ def _openocd_program_line(arguments: list[str]) -> str:
     return lines[0]
 
 
-@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
-def test_bin_flash_carries_the_flash_address_in_the_tool_argument_order(tmp_path: Path, backend: str) -> None:
-    firmware = tmp_path / "build" / "firmware.bin"
-    firmware.parent.mkdir(parents=True)
-    firmware.write_bytes(b"\x01\x02\x03\x04")
-    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
-    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
-    finally:
-        service.close()
+def test_bin_flash_carries_the_flash_address_in_the_tool_argument_order(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, backend: str) -> None:
+        firmware = tmp_path / "build" / "firmware.bin"
+        firmware.parent.mkdir(parents=True)
+        firmware.write_bytes(b"\x01\x02\x03\x04")
+        probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+        target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
+        config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+        service = AgenticHILToolService(config)
+        try:
+            result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+        finally:
+            service.close()
 
-    assert result["ok"] is True, result
-    arguments = _logged_arguments(tmp_path, result)
-    if backend == "stlink":
-        at = arguments.index("-w")
-        assert Path(arguments[at + 1]).suffix == ".bin", arguments
-        assert arguments[at + 2] == "0x08000000", arguments
-        # The verify flag follows the address; it is not what the address
-        # displaced.
-        assert arguments[at + 3] == "-v", arguments
-        assert arguments.count("0x08000000") == 1, arguments
-    elif backend == "openocd":
-        # OpenOCD's `program` takes a binary image's load address as its
-        # offset argument, which its `help program` lists right after the file;
-        # without one it writes the image from address 0.
-        script = _openocd_program_line(arguments)
-        assert re.fullmatch(r'program "[^"]*\.bin" 0x08000000 verify', script), script
-        assert script.count("0x08000000") == 1, script
-    else:
-        # The fake is a script, so the interpreter and the script stand in
-        # front of pyOCD's own subcommand; the order asserted starts there.
-        subcommand = arguments.index("flash")
-        at = arguments.index("--base-address")
-        assert subcommand < at, arguments
-        assert arguments[at + 1] == "0x08000000", arguments
-        assert Path(arguments[-1]).suffix == ".bin", arguments
-        assert at + 1 < len(arguments) - 1, "the address option stands before the file, which is the last argument"
-        assert "--no-reset" in arguments[subcommand:at], arguments
-        assert arguments.count("0x08000000") == 1, arguments
+        assert result["ok"] is True, result
+        arguments = _logged_arguments(tmp_path, result)
+        if backend == "stlink":
+            at = arguments.index("-w")
+            assert Path(arguments[at + 1]).suffix == ".bin", arguments
+            assert arguments[at + 2] == "0x08000000", arguments
+            # The verify flag follows the address; it is not what the address
+            # displaced.
+            assert arguments[at + 3] == "-v", arguments
+            assert arguments.count("0x08000000") == 1, arguments
+        elif backend == "openocd":
+            # OpenOCD's `program` takes a binary image's load address as its
+            # offset argument, which its `help program` lists right after the file;
+            # without one it writes the image from address 0.
+            script = _openocd_program_line(arguments)
+            assert re.fullmatch(r'program "[^"]*\.bin" 0x08000000 verify', script), script
+            assert script.count("0x08000000") == 1, script
+        else:
+            # The fake is a script, so the interpreter and the script stand in
+            # front of pyOCD's own subcommand; the order asserted starts there.
+            subcommand = arguments.index("flash")
+            at = arguments.index("--base-address")
+            assert subcommand < at, arguments
+            assert arguments[at + 1] == "0x08000000", arguments
+            assert Path(arguments[-1]).suffix == ".bin", arguments
+            assert at + 1 < len(arguments) - 1, "the address option stands before the file, which is the last argument"
+            assert "--no-reset" in arguments[subcommand:at], arguments
+            assert arguments.count("0x08000000") == 1, arguments
+
+    rows = parameter_rows(["openocd", "stlink", "pyocd"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
-def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
+def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path) -> None:
     """The neighbour: the address is for a raw image and is not read for an ELF.
 
     An ELF carries its own load addresses, and a configured `flash_address`
@@ -10977,87 +10956,100 @@ def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_p
     image. The knowledge the product publishes says the field is not read for
     .elf or .hex; this is that sentence held against the argument list.
     """
-    firmware = tmp_path / "build" / "firmware.elf"
-    firmware.parent.mkdir(parents=True)
-    firmware.write_bytes(b"\x7fELFfake")
-    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
-    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.elf"})
-    finally:
-        service.close()
 
-    assert result["ok"] is True, result
-    arguments = _logged_arguments(tmp_path, result)
-    assert "0x08000000" not in arguments, arguments
-    assert "--base-address" not in arguments, arguments
-    if backend == "stlink":
-        at = arguments.index("-w")
-        assert Path(arguments[at + 1]).suffix == ".elf", arguments
-        assert arguments[at + 2] == "-v", arguments
-    elif backend == "openocd":
-        assert re.fullmatch(r'program "[^"]*\.elf" verify', _openocd_program_line(arguments)), arguments
-    else:
-        assert Path(arguments[-1]).suffix == ".elf", arguments
+    def check_row(tmp_path, _patch, backend: str) -> None:
+        firmware = tmp_path / "build" / "firmware.elf"
+        firmware.parent.mkdir(parents=True)
+        firmware.write_bytes(b"\x7fELFfake")
+        probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+        target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
+        config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+        service = AgenticHILToolService(config)
+        try:
+            result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.elf"})
+        finally:
+            service.close()
+
+        assert result["ok"] is True, result
+        arguments = _logged_arguments(tmp_path, result)
+        assert "0x08000000" not in arguments, arguments
+        assert "--base-address" not in arguments, arguments
+        if backend == "stlink":
+            at = arguments.index("-w")
+            assert Path(arguments[at + 1]).suffix == ".elf", arguments
+            assert arguments[at + 2] == "-v", arguments
+        elif backend == "openocd":
+            assert re.fullmatch(r'program "[^"]*\.elf" verify', _openocd_program_line(arguments)), arguments
+        else:
+            assert Path(arguments[-1]).suffix == ".elf", arguments
+
+    rows = parameter_rows(["openocd", "stlink", "pyocd"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
-def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path, backend: str) -> None:
+def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path) -> None:
     """The other neighbour: the refusal stays, and it stays before the tool runs.
 
     The two tests above this section pin the refusal's type and summary; this
     one pins that no log was written, because a refusal that had already handed
     the tool a write with no address would be the defect in another shape.
     """
-    firmware = tmp_path / "build" / "firmware.bin"
-    firmware.parent.mkdir(parents=True)
-    firmware.write_bytes(b"\x01\x02\x03\x04")
-    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
-    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
-    finally:
-        service.close()
 
-    assert result["ok"] is False, result
-    assert result["error_type"] == "invalid_argument"
-    assert "log_path" not in result, result
+    def check_row(tmp_path, _patch, backend: str) -> None:
+        firmware = tmp_path / "build" / "firmware.bin"
+        firmware.parent.mkdir(parents=True)
+        firmware.write_bytes(b"\x01\x02\x03\x04")
+        probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+        target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
+        config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
+        service = AgenticHILToolService(config)
+        try:
+            result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+        finally:
+            service.close()
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "invalid_argument"
+        assert "log_path" not in result, result
+
+    rows = parameter_rows(["openocd", "stlink", "pyocd"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
-def test_a_hex_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
+def test_a_hex_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path) -> None:
     """The other format that carries its own addresses: an Intel HEX record names
     where every byte goes, so a configured `flash_address` is not read for it
     either, on either backend."""
-    firmware = tmp_path / "build" / "firmware.hex"
-    firmware.parent.mkdir(parents=True)
-    records = [intel_hex_record(0, 0x04, bytes([0x08, 0x00])), intel_hex_record(0, 0x00, b"\x01\x02\x03\x04"), ":00000001FF"]
-    firmware.write_text("\n".join(records) + "\n", encoding="ascii")
-    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
-    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.hex"})
-    finally:
-        service.close()
 
-    assert result["ok"] is True, result
-    arguments = _logged_arguments(tmp_path, result)
-    assert "0x08000000" not in arguments, arguments
-    assert "--base-address" not in arguments, arguments
-    if backend == "stlink":
-        at = arguments.index("-w")
-        assert Path(arguments[at + 1]).suffix == ".hex", arguments
-        assert arguments[at + 2] == "-v", arguments
-    elif backend == "openocd":
-        assert re.fullmatch(r'program "[^"]*\.hex" verify', _openocd_program_line(arguments)), arguments
-    else:
-        assert Path(arguments[-1]).suffix == ".hex", arguments
+    def check_row(tmp_path, _patch, backend: str) -> None:
+        firmware = tmp_path / "build" / "firmware.hex"
+        firmware.parent.mkdir(parents=True)
+        records = [intel_hex_record(0, 0x04, bytes([0x08, 0x00])), intel_hex_record(0, 0x00, b"\x01\x02\x03\x04"), ":00000001FF"]
+        firmware.write_text("\n".join(records) + "\n", encoding="ascii")
+        probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+        target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
+        config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+        service = AgenticHILToolService(config)
+        try:
+            result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.hex"})
+        finally:
+            service.close()
+
+        assert result["ok"] is True, result
+        arguments = _logged_arguments(tmp_path, result)
+        assert "0x08000000" not in arguments, arguments
+        assert "--base-address" not in arguments, arguments
+        if backend == "stlink":
+            at = arguments.index("-w")
+            assert Path(arguments[at + 1]).suffix == ".hex", arguments
+            assert arguments[at + 2] == "-v", arguments
+        elif backend == "openocd":
+            assert re.fullmatch(r'program "[^"]*\.hex" verify', _openocd_program_line(arguments)), arguments
+        else:
+            assert Path(arguments[-1]).suffix == ".hex", arguments
+
+    rows = parameter_rows(["openocd", "stlink", "pyocd"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_bin_flash_with_a_reset_keeps_the_address_between_the_file_and_the_flags(tmp_path: Path) -> None:
@@ -11107,36 +11099,42 @@ def test_an_openocd_bin_flash_with_a_reset_keeps_the_address_after_the_file(tmp_
 BACKEND_TOOL_NAMES = {"openocd": "OpenOCD", "pyocd": "pyOCD", "stlink": "STM32CubeProgrammer"}
 
 
-@pytest.mark.parametrize("backend", sorted(BACKEND_TOOL_NAMES))
-def test_the_bin_refusal_names_the_backend_tool_that_needs_the_address(tmp_path: Path, backend: str) -> None:
-    firmware = tmp_path / "build" / "firmware.bin"
-    firmware.parent.mkdir(parents=True)
-    firmware.write_bytes(b"")
-    config = load_config(str(write_config(tmp_path, debugger_type=backend)))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
-    finally:
-        service.close()
+def test_the_bin_refusal_names_the_backend_tool_that_needs_the_address(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, backend: str) -> None:
+        firmware = tmp_path / "build" / "firmware.bin"
+        firmware.parent.mkdir(parents=True)
+        firmware.write_bytes(b"")
+        config = load_config(str(write_config(tmp_path, debugger_type=backend)))
+        service = AgenticHILToolService(config)
+        try:
+            result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+        finally:
+            service.close()
 
-    assert result["ok"] is False, result
-    assert result["error_type"] == "invalid_argument", result
-    assert result["summary"] == f"Flashing .bin artifacts with {BACKEND_TOOL_NAMES[backend]} requires debuggers.<name>.flash_address.", result
+        assert result["ok"] is False, result
+        assert result["error_type"] == "invalid_argument", result
+        assert result["summary"] == f"Flashing .bin artifacts with {BACKEND_TOOL_NAMES[backend]} requires debuggers.<name>.flash_address.", result
+
+    rows = parameter_rows(sorted(BACKEND_TOOL_NAMES))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("backend", sorted(BACKEND_TOOL_NAMES))
-def test_the_probe_answer_names_the_backend_tool_that_ran(tmp_path: Path, backend: str) -> None:
-    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
-    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "probe_target", {})
-    finally:
-        service.close()
+def test_the_probe_answer_names_the_backend_tool_that_ran(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, backend: str) -> None:
+        probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+        target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
+        config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
+        service = AgenticHILToolService(config)
+        try:
+            result = mcp_tool_call(service, "probe_target", {})
+        finally:
+            service.close()
 
-    assert result["ok"] is True, result
-    assert result["summary"] == f"Target detected through {BACKEND_TOOL_NAMES[backend]}.", result
+        assert result["ok"] is True, result
+        assert result["summary"] == f"Target detected through {BACKEND_TOOL_NAMES[backend]}.", result
+
+    rows = parameter_rows(sorted(BACKEND_TOOL_NAMES))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 FLASH_TOOL_HELP_RECORDINGS = Path(__file__).resolve().parent / "fixtures" / "flash_tool_help_recordings.json"
@@ -11219,24 +11217,28 @@ def _firmware_named(tmp_path: Path, name: str) -> None:
         firmware.write_bytes(b"\x01\x02\x03\x04")
 
 
-@pytest.mark.parametrize(("name", "flash_format"), PYOCD_FORMAT_ROWS)
-def test_a_pyocd_flash_names_the_format_whatever_the_case_of_the_extension(tmp_path: Path, name: str, flash_format: str) -> None:
+def test_a_pyocd_flash_names_the_format_whatever_the_case_of_the_extension(tmp_path: Path) -> None:
     """The format goes to pyOCD with `--format`, so the case of an extension no longer decides whether a flash runs, and an `.axf` stays an ELF."""
-    _firmware_named(tmp_path, name)
-    service = _pyocd_bench_allowing(tmp_path, [".elf", ".axf", ".hex", ".bin"])
-    try:
-        result = mcp_tool_call(service, "flash_firmware", {"image_path": f"build/{name}"})
-    finally:
-        service.close()
 
-    assert result["ok"] is True, result
-    arguments = _logged_arguments(tmp_path, result)
-    subcommand = arguments.index("flash")
-    at = arguments.index("--format")
-    assert subcommand < at < len(arguments) - 2, "the format option stands after the subcommand and before the file, which is the last argument"
-    assert arguments[at + 1] == flash_format, arguments
-    assert arguments.count("--format") == 1, arguments
-    assert Path(arguments[-1]).name == name, arguments
+    def check_row(tmp_path, _patch, name: str, flash_format: str) -> None:
+        _firmware_named(tmp_path, name)
+        service = _pyocd_bench_allowing(tmp_path, [".elf", ".axf", ".hex", ".bin"])
+        try:
+            result = mcp_tool_call(service, "flash_firmware", {"image_path": f"build/{name}"})
+        finally:
+            service.close()
+
+        assert result["ok"] is True, result
+        arguments = _logged_arguments(tmp_path, result)
+        subcommand = arguments.index("flash")
+        at = arguments.index("--format")
+        assert subcommand < at < len(arguments) - 2, "the format option stands after the subcommand and before the file, which is the last argument"
+        assert arguments[at + 1] == flash_format, arguments
+        assert arguments.count("--format") == 1, arguments
+        assert Path(arguments[-1]).name == name, arguments
+
+    rows = parameter_rows(PYOCD_FORMAT_ROWS, multiple=True, ids=['firmware.elf-elf', 'FIRMWARE.ELF-elf', 'firmware.axf-elf', 'FIRMWARE.HEX-hex', 'FIRMWARE.BIN-bin'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_pyocd_flash_refuses_an_extension_that_names_no_pyocd_format_before_pyocd_runs(tmp_path: Path) -> None:
@@ -11278,8 +11280,7 @@ def reset_probe_id(backend: str) -> str:
     return "STLINK123" if backend == "stlink" else "PYOCD123"
 
 
-@pytest.mark.parametrize(("backend", "mode"), sorted(BACKEND_RESET_COMMANDS))
-def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_path: Path, backend: str, mode: str) -> None:
+def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_path: Path) -> None:
     """One command line per backend per mode, which is the only comparable thing.
 
     The mode defect survived three releases because nothing here compared the
@@ -11297,18 +11298,23 @@ def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_pa
     test_stlink_confirms_each_reset_mode_on_the_lines_its_own_command_prints;
     what this test has to hold is that the argument reaching the CLI is the one
     the mode names."""
-    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=reset_probe_id(backend))))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "reset_target", {"mode": mode})
-    finally:
-        service.close()
 
-    assert result["mode"] == mode
-    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
-    assert BACKEND_RESET_COMMANDS[(backend, mode)] in logged
-    other = "halt" if mode == "run" else "run"
-    assert BACKEND_RESET_COMMANDS[(backend, other)] not in logged
+    def check_row(tmp_path, _patch, backend: str, mode: str) -> None:
+        config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=reset_probe_id(backend))))
+        service = AgenticHILToolService(config)
+        try:
+            result = mcp_tool_call(service, "reset_target", {"mode": mode})
+        finally:
+            service.close()
+
+        assert result["mode"] == mode
+        logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+        assert BACKEND_RESET_COMMANDS[(backend, mode)] in logged
+        other = "halt" if mode == "run" else "run"
+        assert BACKEND_RESET_COMMANDS[(backend, other)] not in logged
+
+    rows = parameter_rows(sorted(BACKEND_RESET_COMMANDS), multiple=True, ids=['pyocd-halt', 'pyocd-run', 'stlink-halt', 'stlink-run'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize("backend", ["stlink", "pyocd"])
@@ -12045,12 +12051,18 @@ def test_registration_refuses_a_child_it_did_not_spawn() -> None:
         child.wait(timeout=scaled_time_bound(5))
 
 
-@pytest.mark.parametrize("function", ["spawn_managed_process", "spawn_detached_process"])
-@pytest.mark.parametrize(("keyword", "value"), [("creationflags", 0), ("start_new_session", True)])
-def test_spawn_refuses_caller_supplied_creation_flags(function: str, keyword: str, value: object) -> None:
+def test_spawn_refuses_caller_supplied_creation_flags(tmp_path: Path) -> None:
     """The flags are the contract, so a caller cannot re-open the hole from outside."""
-    with pytest.raises(TypeError, match="spawn contract"):
-        getattr(process_module, function)([sys.executable, "-c", "pass"], **{keyword: value})
+
+    def check_row(_workspace, _patch, keyword: str, value: object, function: str) -> None:
+        with pytest.raises(TypeError, match="spawn contract"):
+            getattr(process_module, function)([sys.executable, "-c", "pass"], **{keyword: value})
+
+    rows = combine_parameter_rows(
+        parameter_rows([("creationflags", 0), ("start_new_session", True)], multiple=True, ids=['creationflags-0', 'start_new_session-True']),
+        parameter_rows(["spawn_managed_process", "spawn_detached_process"], ids=['spawn_managed_process', 'spawn_detached_process']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object verification regression")
@@ -12133,15 +12145,18 @@ def test_peak_adapter_on_posix_requires_socketcan_channel(tmp_path: Path) -> Non
     assert result["error_type"] == "config_invalid"
 
 
-@pytest.mark.parametrize("command", ["init", "doctor", "mcp-stdio", "com-stdio"])
-def test_legacy_cli_config_option_is_parsed(command: str) -> None:
-    arguments = [command, "--config", "legacy.yaml"]
-    if command == "com-stdio":
-        arguments.extend(["--port", "dut"])
+def test_legacy_cli_config_option_is_parsed(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, command: str) -> None:
+        arguments = [command, "--config", "legacy.yaml"]
+        if command == "com-stdio":
+            arguments.extend(["--port", "dut"])
 
-    parsed = build_parser().parse_args(arguments)
+        parsed = build_parser().parse_args(arguments)
 
-    assert parsed.config == "legacy.yaml"
+        assert parsed.config == "legacy.yaml"
+
+    rows = parameter_rows(["init", "doctor", "mcp-stdio", "com-stdio"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_doctor_checks_every_probe_that_grants_allow_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

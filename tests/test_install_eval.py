@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from parameter_rows import check_parameter_rows, parameter_rows
 from support import scaled_time_bound
 
 from evals.install import bench_openocd, guard, refresh_login, scrub_credentials
@@ -48,20 +49,20 @@ from evals.install.verifier import overall_success
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize(
-    ("agent", "model", "model_flag"),
-    [
+def test_agent_command_keeps_model_as_explicit_axis(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, agent: str, model: str, model_flag: str) -> None:
+        command = build_agent_command(agent, model, "install")
+
+        assert model_flag in command
+        assert command[command.index(model_flag) + 1] == model
+        assert command[-1] == "install"
+
+    rows = parameter_rows([
         ("codex", "gpt-test", "--model"),
         ("claude", "claude-test", "--model"),
         ("opencode", "provider/model-test", "--model"),
-    ],
-)
-def test_agent_command_keeps_model_as_explicit_axis(agent: str, model: str, model_flag: str) -> None:
-    command = build_agent_command(agent, model, "install")
-
-    assert model_flag in command
-    assert command[command.index(model_flag) + 1] == model
-    assert command[-1] == "install"
+    ], multiple=True, ids=['codex-gpt-test---model', 'claude-claude-test---model', 'opencode-provider/model-test---model'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(
@@ -78,47 +79,56 @@ def test_only_the_isolated_session_ignores_the_agent_user_config(agent: str, iso
     assert isolating_flag not in connected
 
 
-@pytest.mark.parametrize(
-    ("agent", "expected"),
-    [
+def test_agent_command_carries_the_reasoning_effort(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, agent: str, expected: list[str]) -> None:
+        command = build_agent_command(agent, "model", "prompt", reasoning_effort="medium")
+
+        # Adjacent: a flag separated from its value is a different command.
+        assert any(command[index : index + 2] == expected for index in range(len(command) - 1))
+
+    rows = parameter_rows([
         ("codex", ["--config", "model_reasoning_effort=medium"]),
         ("claude-code", ["--effort", "medium"]),
         ("opencode", ["--variant", "medium"]),
-    ],
-)
-def test_agent_command_carries_the_reasoning_effort(agent: str, expected: list[str]) -> None:
-    command = build_agent_command(agent, "model", "prompt", reasoning_effort="medium")
-
-    # Adjacent: a flag separated from its value is a different command.
-    assert any(command[index : index + 2] == expected for index in range(len(command) - 1))
+    ], multiple=True, ids=['codex-expected0', 'claude-code-expected1', 'opencode-expected2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
-def test_reasoning_effort_reaches_both_sessions(agent: str) -> None:
-    # The installing session is deliberately isolated and the measured session
-    # deliberately is not. An effort that reached only one of them would have
-    # the follow-up answer as a different model than the one that installed.
-    isolated = build_agent_command(agent, "model", "prompt", reasoning_effort="high")
-    connected = build_agent_command(agent, "model", "prompt", isolated=False, reasoning_effort="high")
+def test_reasoning_effort_reaches_both_sessions(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, agent: str) -> None:
+        # The installing session is deliberately isolated and the measured session
+        # deliberately is not. An effort that reached only one of them would have
+        # the follow-up answer as a different model than the one that installed.
+        isolated = build_agent_command(agent, "model", "prompt", reasoning_effort="high")
+        connected = build_agent_command(agent, "model", "prompt", isolated=False, reasoning_effort="high")
 
-    assert "high" in " ".join(isolated)
-    assert "high" in " ".join(connected)
+        assert "high" in " ".join(isolated)
+        assert "high" in " ".join(connected)
 
-
-@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
-def test_agent_command_says_nothing_about_effort_when_none_was_asked(agent: str) -> None:
-    command = " ".join(build_agent_command(agent, "model", "prompt"))
-
-    for flag in ("--effort", "--variant", "model_reasoning_effort"):
-        assert flag not in command
+    rows = parameter_rows(["codex", "claude-code", "opencode"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("effort", ["ultrathink", "ultra", "none", ""])
-def test_agent_command_refuses_an_effort_the_agents_do_not_share(effort: str) -> None:
-    # "ultra" is codex-only and "none" is opencode-only: accepting either would
-    # hand the other CLIs a silent default and the comparison would be a fiction.
-    with pytest.raises(ValueError, match="reasoning_effort"):
-        build_agent_command("codex", "model", "prompt", reasoning_effort=effort)
+def test_agent_command_says_nothing_about_effort_when_none_was_asked(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, agent: str) -> None:
+        command = " ".join(build_agent_command(agent, "model", "prompt"))
+
+        for flag in ("--effort", "--variant", "model_reasoning_effort"):
+            assert flag not in command
+
+    rows = parameter_rows(["codex", "claude-code", "opencode"])
+    check_parameter_rows(tmp_path, rows, check_row)
+
+
+def test_agent_command_refuses_an_effort_the_agents_do_not_share(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, effort: str) -> None:
+        # "ultra" is codex-only and "none" is opencode-only: accepting either would
+        # hand the other CLIs a silent default and the comparison would be a fiction.
+        with pytest.raises(ValueError, match="reasoning_effort"):
+            build_agent_command("codex", "model", "prompt", reasoning_effort=effort)
+
+    rows = parameter_rows(["ultrathink", "ultra", "none", ""])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_adapter_aliases_resolve_to_setup_agent_names() -> None:
@@ -362,14 +372,14 @@ def test_claude_stream_json_output_is_paired_with_verbose() -> None:
     assert "--verbose" in command
 
 
-@pytest.mark.parametrize(
-    ("agent", "kind"),
-    [("codex", "codex-auth"), ("claude-code", "claude-auth"), ("opencode", "opencode-auth")],
-)
-def test_every_agent_cli_accepts_its_own_file_login(agent: str, kind: str, tmp_path: Path) -> None:
-    matrix = _matrix_with_credential_file(tmp_path, agent, kind)
+def test_every_agent_cli_accepts_its_own_file_login(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, agent: str, kind: str) -> None:
+        matrix = _matrix_with_credential_file(tmp_path, agent, kind)
 
-    assert load_matrix(matrix).jobs[0].credential_files[0].kind == kind
+        assert load_matrix(matrix).jobs[0].credential_files[0].kind == kind
+
+    rows = parameter_rows([("codex", "codex-auth"), ("claude-code", "claude-auth"), ("opencode", "opencode-auth")], multiple=True, ids=['codex-codex-auth', 'claude-code-claude-auth', 'opencode-opencode-auth'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_file_login_kind_stays_bound_to_its_agent(tmp_path: Path) -> None:
@@ -806,23 +816,26 @@ def test_tool_evidence_is_asked_for_in_a_second_session() -> None:
     assert "Install Agentic HIL" not in case.followup_prompt
 
 
-@pytest.mark.parametrize("case_id", ["firmware-routing", "firmware-readiness", "firmware-flash-request"])
-def test_the_control_arm_differs_only_in_the_skill(case_id: str) -> None:
-    cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
-    treatment = load_case(cases / f"{case_id}.json")
-    control = load_case(cases / f"{case_id}-without-skill.json")
+def test_the_control_arm_differs_only_in_the_skill(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, case_id: str) -> None:
+        cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
+        treatment = load_case(cases / f"{case_id}.json")
+        control = load_case(cases / f"{case_id}-without-skill.json")
 
-    # Same prompts, same fixture: the skill is the only thing that varies, or
-    # the difference in routing cannot be attributed to it.
-    assert control.prompt_template == treatment.prompt_template
-    assert control.followup_prompt == treatment.followup_prompt
-    assert control.fixture == treatment.fixture
-    assert control.workspace_fixture == treatment.workspace_fixture
-    assert control.remove_skill_before_followup
-    assert not treatment.remove_skill_before_followup
-    # Without the skill the run may legitimately answer another way, so tool
-    # evidence is measured rather than required.
-    assert not control.requires_tool_use
+        # Same prompts, same fixture: the skill is the only thing that varies, or
+        # the difference in routing cannot be attributed to it.
+        assert control.prompt_template == treatment.prompt_template
+        assert control.followup_prompt == treatment.followup_prompt
+        assert control.fixture == treatment.fixture
+        assert control.workspace_fixture == treatment.workspace_fixture
+        assert control.remove_skill_before_followup
+        assert not treatment.remove_skill_before_followup
+        # Without the skill the run may legitimately answer another way, so tool
+        # evidence is measured rather than required.
+        assert not control.requires_tool_use
+
+    rows = parameter_rows(["firmware-routing", "firmware-readiness", "firmware-flash-request"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def _routing_entry(case_id: str, mcp_calls: int, *, mcp_available: bool | None = True) -> dict:
@@ -1843,20 +1856,21 @@ def write_process(root: Path, pid: int, argv: list[str], ppid: int = 1) -> None:
     (entry / "status").write_text(f"Name:\tpython3\nPPid:\t{ppid}\n", encoding="utf-8")
 
 
-@pytest.mark.parametrize(
-    ("argv", "expected"),
-    [
+def test_the_guard_knows_which_command_lines_are_the_runtime(tmp_path: Path) -> None:
+    """The window 222 asks for is only as good as what it recognises."""
+
+    def check_row(_workspace, _patch, argv: list[str], expected: bool) -> None:
+        assert guard.names_agentic_hil_runtime(argv) is expected
+
+    rows = parameter_rows([
         (["/usr/bin/python3", "/home/eval/.local/bin/agentic-hil", "mcp-stdio"], True),
         (["/usr/bin/python3", "-m", "agentic_hil", "doctor"], True),
         (["python", "-I", "-c", 'runpy.run_module("agentic_hil", run_name="__main__")', "/opt/pkg", "doctor"], True),
         (["/bin/bash", "-lc", "openocd --version"], False),
         (["node", "/opt/agent-clis/node_modules/.bin/claude"], False),
         (["/bin/sh", "-c", "make flash # agentic-hil is installed"], False),
-    ],
-)
-def test_the_guard_knows_which_command_lines_are_the_runtime(argv: list[str], expected: bool) -> None:
-    """The window 222 asks for is only as good as what it recognises."""
-    assert guard.names_agentic_hil_runtime(argv) is expected
+    ], multiple=True, ids=['argv0-True', 'argv1-True', 'argv2-True', 'argv3-False', 'argv4-False', 'argv5-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_the_guard_serves_the_runtimes_own_call_and_refuses_the_agents(
@@ -2457,9 +2471,29 @@ def test_local_source_snapshot_excludes_unrelated_and_secret_files(tmp_path: Pat
     assert not (snapshot / "unrelated.txt").exists()
 
 
-@pytest.mark.parametrize(
-    ("patch", "expected"),
-    [
+def test_independent_success_predicate(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, patch: dict[str, object], expected: bool) -> None:
+        # `side_effect_status: committed` because that is what a successful effectful
+        # call actually carries. The base said `none`, a value no production path
+        # emits, so the unpatched case asserted that `overall_success` accepts a
+        # status that can never reach it, and the two statuses it does have to
+        # reject are the ones patched below.
+        result = {
+            "ok": True,
+            "target_ok": True,
+            "audit_ok": True,
+            "cleanup_ok": True,
+            "cleanup_required": False,
+            "quarantined": False,
+            "lease_state": None,
+            "side_effect_status": "committed",
+            "hardware_state": "not_applicable",
+            **patch,
+        }
+
+        assert overall_success(result) is expected
+
+    rows = parameter_rows([
         ({}, True),
         ({"ok": False}, False),
         ({"cleanup_ok": False}, False),
@@ -2469,25 +2503,5 @@ def test_local_source_snapshot_excludes_unrelated_and_secret_files(tmp_path: Pat
         ({"side_effect_status": "partial"}, False),
         ({"side_effect_status": "unknown"}, False),
         ({"hardware_state": "unknown"}, False),
-    ],
-)
-def test_independent_success_predicate(patch: dict[str, object], expected: bool) -> None:
-    # `side_effect_status: committed` because that is what a successful effectful
-    # call actually carries. The base said `none`, a value no production path
-    # emits, so the unpatched case asserted that `overall_success` accepts a
-    # status that can never reach it, and the two statuses it does have to
-    # reject are the ones patched below.
-    result = {
-        "ok": True,
-        "target_ok": True,
-        "audit_ok": True,
-        "cleanup_ok": True,
-        "cleanup_required": False,
-        "quarantined": False,
-        "lease_state": None,
-        "side_effect_status": "committed",
-        "hardware_state": "not_applicable",
-        **patch,
-    }
-
-    assert overall_success(result) is expected
+    ], multiple=True, ids=['patch0-True', 'patch1-False', 'patch2-False', 'patch3-False', 'patch4-False', 'patch5-False', 'patch6-False', 'patch7-False', 'patch8-False'])
+    check_parameter_rows(tmp_path, rows, check_row)

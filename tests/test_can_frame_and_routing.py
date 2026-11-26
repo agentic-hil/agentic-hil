@@ -39,6 +39,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
+from parameter_rows import check_parameter_rows, parameter_rows
 from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import (
@@ -239,30 +240,36 @@ def test_an_operators_tighter_classic_ceiling_still_applies_beneath_the_protocol
     assert refused["max_frame_data_bytes"] == 4
 
 
-@pytest.mark.parametrize("length", [9, 10, 11, 13, 15, 17, 63])
-def test_fd_payload_lengths_outside_the_discrete_set_are_refused(tmp_path: Path, length: int) -> None:
-    config = can_config(tmp_path, adapter="socketcan", channel="can0", fd=True)
-    bus = config.can_buses["bench"]
+def test_fd_payload_lengths_outside_the_discrete_set_are_refused(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, length: int) -> None:
+        config = can_config(tmp_path, adapter="socketcan", channel="can0", fd=True)
+        bus = config.can_buses["bench"]
 
-    refused = payload_frame(bus, {"frame_id": 1, "data_hex": "00" * length})
+        refused = payload_frame(bus, {"frame_id": 1, "data_hex": "00" * length})
 
-    assert refused["ok"] is False
-    assert refused["error_type"] == CAN_FD_FRAME_LENGTH_INVALID_ERROR
-    assert refused["bytes_requested"] == length
-    assert refused["allowed_lengths"] == list(CAN_FD_FRAME_DATA_LENGTHS)
-    assert refused["remediation"]
-    assert_causes_are_about_the_bus(refused["likely_causes"], CAN_FD_FRAME_LENGTH_INVALID_ERROR, refused)
+        assert refused["ok"] is False
+        assert refused["error_type"] == CAN_FD_FRAME_LENGTH_INVALID_ERROR
+        assert refused["bytes_requested"] == length
+        assert refused["allowed_lengths"] == list(CAN_FD_FRAME_DATA_LENGTHS)
+        assert refused["remediation"]
+        assert_causes_are_about_the_bus(refused["likely_causes"], CAN_FD_FRAME_LENGTH_INVALID_ERROR, refused)
+
+    rows = parameter_rows([9, 10, 11, 13, 15, 17, 63])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("length", list(CAN_FD_FRAME_DATA_LENGTHS))
-def test_every_discrete_fd_length_is_accepted(tmp_path: Path, length: int) -> None:
-    config = can_config(tmp_path, adapter="socketcan", channel="can0", fd=True)
-    bus = config.can_buses["bench"]
+def test_every_discrete_fd_length_is_accepted(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, length: int) -> None:
+        config = can_config(tmp_path, adapter="socketcan", channel="can0", fd=True)
+        bus = config.can_buses["bench"]
 
-    accepted = payload_frame(bus, {"frame_id": 1, "data_hex": "00" * length})
+        accepted = payload_frame(bus, {"frame_id": 1, "data_hex": "00" * length})
 
-    assert accepted["ok"] is True
-    assert len(accepted["frame"].data) == length
+        assert accepted["ok"] is True
+        assert len(accepted["frame"].data) == length
+
+    rows = parameter_rows(list(CAN_FD_FRAME_DATA_LENGTHS))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_operators_tighter_fd_ceiling_still_applies_beneath_the_discrete_check(tmp_path: Path) -> None:

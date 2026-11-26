@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_OPENOCD, write_authoritative_config, write_config
 from defmt_wire import build_elf, defmt_symbol, encode_frame, rzcobs_stream
+from parameter_rows import check_parameter_rows, parameter_rows
 from support import scaled_time_bound
 from test_flash_capture import Board, BoardBackend
 
@@ -1125,29 +1126,29 @@ def test_reactor_treats_audit_failure_as_failed_step(tmp_path: Path) -> None:
     assert service.calls == [("flash_firmware", {"image_path": "build/app.elf"})]
 
 
-@pytest.mark.parametrize(
-    ("failed_call", "expected_calls"),
-    [
+def test_run_until_breakpoint_propagates_internal_audit_failures(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, failed_call: str, expected_calls: list[str]) -> None:
+        config = load_config(str(write_config(tmp_path)))
+        plan_path = write_test_config(
+            tmp_path,
+            "version: 2\nsteps:\n  - {debugger: dut, action: debug_start, image_path: build/app.elf}\n  - {debugger: dut, action: run_until_breakpoint, location: test_done}\n",
+        )
+        service = RecordingService(audit_failure_call=failed_call)
+
+        result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+        assert result["ok"] is False
+        assert result["failed_step"] == 2
+        assert result["audit_ok"] is False
+        assert result["retry_safe"] is False
+        assert [name for name, _ in service.calls] == expected_calls
+
+    rows = parameter_rows([
         ("debug_set_breakpoint", ["debug_start_session", "debug_set_breakpoint", "debug_clear_breakpoints", "debug_stop_session"]),
         ("debug_continue", ["debug_start_session", "debug_set_breakpoint", "debug_continue", "debug_clear_breakpoints", "debug_stop_session"]),
         ("debug_clear_breakpoints", ["debug_start_session", "debug_set_breakpoint", "debug_continue", "debug_clear_breakpoints", "debug_stop_session"]),
-    ],
-)
-def test_run_until_breakpoint_propagates_internal_audit_failures(tmp_path: Path, failed_call: str, expected_calls: list[str]) -> None:
-    config = load_config(str(write_config(tmp_path)))
-    plan_path = write_test_config(
-        tmp_path,
-        "version: 2\nsteps:\n  - {debugger: dut, action: debug_start, image_path: build/app.elf}\n  - {debugger: dut, action: run_until_breakpoint, location: test_done}\n",
-    )
-    service = RecordingService(audit_failure_call=failed_call)
-
-    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
-
-    assert result["ok"] is False
-    assert result["failed_step"] == 2
-    assert result["audit_ok"] is False
-    assert result["retry_safe"] is False
-    assert [name for name, _ in service.calls] == expected_calls
+    ], multiple=True, ids=['debug_set_breakpoint-expected_calls0', 'debug_continue-expected_calls1', 'debug_clear_breakpoints-expected_calls2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_run_until_breakpoint_removes_each_owned_breakpoint(tmp_path: Path) -> None:
@@ -3223,9 +3224,20 @@ steps:
     assert reset_service.calls == []
 
 
-@pytest.mark.parametrize(
-    ("step", "field"),
-    [
+def test_new_steps_are_refused_by_the_bundled_schema(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, step: str, field: str) -> None:
+        # Both new steps answer to the same schema pass every other step does: a
+        # missing expectation, a timeout that waits for no time at all, a route field
+        # belonging to another device kind, and a reset mode no backend has.
+        path = write_test_config(tmp_path, f"version: 2\nsteps:\n  - {step}\n")
+
+        with pytest.raises(ConfigError) as refused:
+            load_test_config(str(path), str(tmp_path))
+
+        assert refused.value.error_type == "test_config_invalid"
+        assert refused.value.details["field"] == field
+
+    rows = parameter_rows([
         # Neither expectation: the step names nothing to wait for, which is a
         # fault in the step rather than in one key, so the field is the step.
         ("{port_id: dut_uart, action: uart_expect, timeout_s: 5}", "steps[0]"),
@@ -3237,19 +3249,8 @@ steps:
         ('{port_id: dut_uart, debugger: dut, action: uart_expect, text: "x", timeout_s: 5}', "steps[0].debugger"),
         ("{port_id: dut_uart, action: reset}", "steps[0].port_id"),
         ("{debugger: dut, action: reset, mode: warm}", "steps[0].mode"),
-    ],
-)
-def test_new_steps_are_refused_by_the_bundled_schema(tmp_path: Path, step: str, field: str) -> None:
-    # Both new steps answer to the same schema pass every other step does: a
-    # missing expectation, a timeout that waits for no time at all, a route field
-    # belonging to another device kind, and a reset mode no backend has.
-    path = write_test_config(tmp_path, f"version: 2\nsteps:\n  - {step}\n")
-
-    with pytest.raises(ConfigError) as refused:
-        load_test_config(str(path), str(tmp_path))
-
-    assert refused.value.error_type == "test_config_invalid"
-    assert refused.value.details["field"] == field
+    ], multiple=True, ids=['{port_id: dut_uart, action: uart_expect, timeout_s: 5}-steps[0]', '{port_id: dut_uart, action: uart_expect, text: "", timeout_s: 5}-steps[0].text', '{port_id: dut_uart, action: uart_expect, pattern: "", timeout_s: 5}-steps[0].pattern', '{port_id: dut_uart, action: uart_expect, text: "Hello World", timeout_s: 0}-steps[0].timeout_s', '{port_id: dut_uart, action: uart_expect, text: "Hello World", timeout_s: -1}-steps[0].timeout_s', '{port_id: dut_uart, action: uart_expect, text: "Hello World"}-steps[0].timeout_s', '{port_id: dut_uart, debugger: dut, action: uart_expect, text: "x", timeout_s: 5}-steps[0].debugger', '{port_id: dut_uart, action: reset}-steps[0].port_id', '{debugger: dut, action: reset, mode: warm}-steps[0].mode'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(
@@ -3410,14 +3411,14 @@ V2_PLAN_STEPS: dict[str, list[tuple[str, str | None, str | None, str | None, dic
 }
 
 
-@pytest.mark.parametrize(
-    ("name", "text"),
-    [("example", V2_EXAMPLE_PLAN), ("demo", V2_DEMO_PLAN), ("openocd", V2_OPENOCD_PLAN), ("stlink", V2_STLINK_PLAN)],
-)
-def test_version_2_plans_parse_to_exactly_the_steps_they_always_did(tmp_path: Path, name: str, text: str) -> None:
-    loaded = load_test_config(str(write_test_config(tmp_path, text)), str(tmp_path))
+def test_version_2_plans_parse_to_exactly_the_steps_they_always_did(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, name: str, text: str) -> None:
+        loaded = load_test_config(str(write_test_config(tmp_path, text)), str(tmp_path))
 
-    assert [(step.action, step.debugger, step.port_id, step.bus_id, step.arguments) for step in loaded.steps] == V2_PLAN_STEPS[name]
+        assert [(step.action, step.debugger, step.port_id, step.bus_id, step.arguments) for step in loaded.steps] == V2_PLAN_STEPS[name]
+
+    rows = parameter_rows([("example", V2_EXAMPLE_PLAN), ("demo", V2_DEMO_PLAN), ("openocd", V2_OPENOCD_PLAN), ("stlink", V2_STLINK_PLAN)], multiple=True, ids=['example-version: 2\\nname: capture-state\\nsteps:\\n  - {debugger: dut, action: flash, image_path: build/app.elf}\\n  - {port_id: dut_uart, action: uart_open, clear_buffer: true}\\n  - {bus_id: dut_can, action: can_open, clear_rx_queue: true}\\n  - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}\\n  - {debugger: dut, action: run_until_breakpoint, location: capture_done, timeout_s: 5}\\n  - {bus_id: dut_can, action: can_read, max_frames: 64, wait_timeout_s: 1}\\n  - {debugger: dut, action: dump_memory, symbol: capture_buffer, output_path: build/capture.hex}\\n  - {debugger: dut, action: debug_stop}\\n  - {bus_id: dut_can, action: can_close}\\n  - {port_id: dut_uart, action: uart_close}\\n', 'demo-version: 2\\nname: nucleo-f446re-hello-world\\nsteps:\\n  - {debugger: dut, action: flash, image_path: build/Debug/nucleo-f446re_demo.elf}\\n  - {port_id: dut_uart, action: uart_open, clear_buffer: true}\\n  - {debugger: dut, action: reset, mode: run}\\n  - {port_id: dut_uart, action: uart_expect, text: "Hello World", timeout_s: 5}\\n  - {port_id: dut_uart, action: uart_close}\\n', 'openocd-version: 2\\nname: nucleo-f446re-openocd\\nsteps:\\n  - {debugger: dut, action: flash, image_path: build/Debug/demo.elf, reset_after_flash: true}\\n  - {port_id: dut_uart, action: uart_open}\\n  - {debugger: dut, action: debug_start, image_path: build/Debug/demo.elf, mode: reset_halt}\\n  - {debugger: dut, action: run_until_breakpoint, location: delay, timeout_s: 5}\\n  - {debugger: dut, action: debug_stop}\\n  - {port_id: dut_uart, action: uart_close}\\n', 'stlink-version: 2\\nname: nucleo-f446re-stlink\\nsteps:\\n  - {debugger: dut, action: flash, image_path: build/Debug/demo.elf, reset_after_flash: true}\\n  - {port_id: dut_uart, action: uart_open}\\n  - {port_id: dut_uart, action: uart_close}\\n'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_version_2_demo_plan_runs_to_exactly_the_result_it_always_did(tmp_path: Path) -> None:
@@ -4682,9 +4683,23 @@ def test_a_delay_longer_than_the_cap_is_refused(tmp_path: Path) -> None:
     assert refused.value.details["field"] == "steps[0].duration_ms"
 
 
-@pytest.mark.parametrize(
-    ("step", "named"),
-    [
+def test_a_version_2_plan_cannot_reach_for_version_3(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, step: str, named: str) -> None:
+        # The version a plan declares is what tells another install whether it can
+        # run it, so a v2 plan using a v3 action or key is refused by name rather
+        # than working here and failing there for no stated reason.
+        path = write_test_config(tmp_path, f"version: 2\nsteps:\n  - {step}\n")
+
+        with pytest.raises(ConfigError) as refused:
+            load_test_config(str(path), str(tmp_path))
+
+        assert refused.value.error_type == "test_config_invalid"
+        assert refused.value.details["value"] == named
+        assert refused.value.details["plan_version"] == 2
+        assert refused.value.details["requires_plan_version"] == 3
+        assert "version: 3" in refused.value.details["migration"]
+
+    rows = parameter_rows([
         ("{device: dut_uart, action: uart_open}", "device"),
         ("{port_id: dut_uart, action: uart_read, timeout_s: 1}", "uart_read"),
         ("{port_id: dut_uart, action: uart_write, text: hi}", "uart_write"),
@@ -4692,22 +4707,8 @@ def test_a_delay_longer_than_the_cap_is_refused(tmp_path: Path) -> None:
         # `can_read` is a version 2 action; what is new on it is the claim, so
         # the key is what the gate names rather than the step.
         ('{bus_id: dut_can, action: can_read, comparator: {id: 1, equals: "01"}, timeout_s: 1}', "comparator"),
-    ],
-)
-def test_a_version_2_plan_cannot_reach_for_version_3(tmp_path: Path, step: str, named: str) -> None:
-    # The version a plan declares is what tells another install whether it can
-    # run it, so a v2 plan using a v3 action or key is refused by name rather
-    # than working here and failing there for no stated reason.
-    path = write_test_config(tmp_path, f"version: 2\nsteps:\n  - {step}\n")
-
-    with pytest.raises(ConfigError) as refused:
-        load_test_config(str(path), str(tmp_path))
-
-    assert refused.value.error_type == "test_config_invalid"
-    assert refused.value.details["value"] == named
-    assert refused.value.details["plan_version"] == 2
-    assert refused.value.details["requires_plan_version"] == 3
-    assert "version: 3" in refused.value.details["migration"]
+    ], multiple=True, ids=['{device: dut_uart, action: uart_open}-device', '{port_id: dut_uart, action: uart_read, timeout_s: 1}-uart_read', '{port_id: dut_uart, action: uart_write, text: hi}-uart_write', '{port_id: dut_uart, action: delay, duration_ms: 5}-delay', '{bus_id: dut_can, action: can_read, comparator: {id: 1, equals: "01"}, timeout_s: 1}-comparator'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_every_plan_this_repository_ships_loads(tmp_path: Path) -> None:
@@ -5353,17 +5354,20 @@ steps:
     assert [record["action"] for record in result["cleanup"]] == ["debug_stop"]
 
 
-@pytest.mark.parametrize(("value", "met"), [(20, True), (25, True), (30, True), (19, False), (31, False)], ids=str)
-def test_a_symbol_range_holds_the_value_to_inclusive_bounds(tmp_path: Path, value: int, met: bool) -> None:
-    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter, comparator: {range: {min: 20, max: 30}}}")
-    service = SymbolService(value.to_bytes(4, "little"))
+def test_a_symbol_range_holds_the_value_to_inclusive_bounds(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, value: int, met: bool) -> None:
+        path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter, comparator: {range: {min: 20, max: 30}}}")
+        service = SymbolService(value.to_bytes(4, "little"))
 
-    result = run_symbol_plan(tmp_path, path, service)
+        result = run_symbol_plan(tmp_path, path, service)
 
-    read = result["steps"][1]["result"]
-    assert read["ok"] is met, read
-    assert read["captured_value"] == value
-    assert read["summary"] == ("The symbol's value fell inside the expected range." if met else "The symbol's value fell outside the expected range.")
+        read = result["steps"][1]["result"]
+        assert read["ok"] is met, read
+        assert read["captured_value"] == value
+        assert read["summary"] == ("The symbol's value fell inside the expected range." if met else "The symbol's value fell outside the expected range.")
+
+    rows = parameter_rows([(20, True), (25, True), (30, True), (19, False), (31, False)], multiple=True, ids=['20-True', '25-True', '30-True', '19-False', '31-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(("data", "met"), [(b"\xf5\x00\x00\x00", True), (b"\xf6\x00\x00\x00", False)], ids=["bits_match", "bits_differ"])
@@ -5531,28 +5535,27 @@ def test_read_symbol_takes_no_timeout_because_it_does_not_wait(tmp_path: Path) -
     assert refused.value.details["field"] == "steps[1].timeout_s"
 
 
-@pytest.mark.parametrize(
-    ("comparator", "field"),
-    [
+def test_a_symbol_comparator_the_format_cannot_mean_is_refused_at_load(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, comparator: str, field: str) -> None:
+        # One claim per comparator, `mask` only as a claim about a value, and no sign
+        # beside a mask because a mask selects bits while a sign reads the whole
+        # width. The text vocabulary is not this comparator's at all.
+        path = symbol_plan(tmp_path, f"{{device: dut, action: read_symbol, symbol: boot_counter, comparator: {comparator}}}")
+
+        with pytest.raises(ConfigError) as refused:
+            load_test_config(str(path), str(tmp_path))
+
+        assert refused.value.error_type == "test_config_invalid"
+        assert refused.value.details["field"] == field
+
+    rows = parameter_rows([
         ("{}", "steps[1].comparator"),
         ("{equals: 1, range: {min: 0, max: 2}}", "steps[1].comparator"),
         ("{mask: 15}", "steps[1].comparator"),
         ("{mask: 15, equals: 1, signed: true}", "steps[1].comparator"),
         ("{equals: 1, pattern: abc}", "steps[1].comparator.pattern"),
-    ],
-    ids=["neither", "both", "mask_without_equals", "mask_with_signed", "text_vocabulary"],
-)
-def test_a_symbol_comparator_the_format_cannot_mean_is_refused_at_load(tmp_path: Path, comparator: str, field: str) -> None:
-    # One claim per comparator, `mask` only as a claim about a value, and no sign
-    # beside a mask because a mask selects bits while a sign reads the whole
-    # width. The text vocabulary is not this comparator's at all.
-    path = symbol_plan(tmp_path, f"{{device: dut, action: read_symbol, symbol: boot_counter, comparator: {comparator}}}")
-
-    with pytest.raises(ConfigError) as refused:
-        load_test_config(str(path), str(tmp_path))
-
-    assert refused.value.error_type == "test_config_invalid"
-    assert refused.value.details["field"] == field
+    ], multiple=True, ids=["neither", "both", "mask_without_equals", "mask_with_signed", "text_vocabulary"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_version_4_plan_cannot_reach_for_read_symbol(tmp_path: Path) -> None:
@@ -6146,40 +6149,40 @@ def test_defmt_selector_validation_precedes_hardware(tmp_path: Path) -> None:
         assert dispatch_service.calls == []
 
 
-@pytest.mark.parametrize(
-    "timeout_s",
-    [pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")],
-)
-def test_defmt_nonfinite_timeout_loading(tmp_path: Path, timeout_s: float) -> None:
-    import yaml
+def test_defmt_nonfinite_timeout_loading(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, timeout_s: float) -> None:
+        import yaml
 
-    step = {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s}
-    plan_path = write_test_config(tmp_path, yaml.safe_dump({"version": 7, "steps": [step]}, sort_keys=False))
+        step = {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s}
+        plan_path = write_test_config(tmp_path, yaml.safe_dump({"version": 7, "steps": [step]}, sort_keys=False))
 
-    with pytest.raises(ConfigError) as invalid_plan:
-        load_test_config(str(plan_path), str(tmp_path))
+        with pytest.raises(ConfigError) as invalid_plan:
+            load_test_config(str(plan_path), str(tmp_path))
 
-    assert invalid_plan.value.error_type == "test_config_invalid"
-    assert invalid_plan.value.details["field"] == "steps[0].timeout_s"
+        assert invalid_plan.value.error_type == "test_config_invalid"
+        assert invalid_plan.value.details["field"] == "steps[0].timeout_s"
+
+    rows = parameter_rows([pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    "timeout_s",
-    [pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")],
-)
-def test_defmt_nonfinite_timeout_direct_dispatch(tmp_path: Path, timeout_s: float) -> None:
-    from agentic_hil.test_reactor import build_test_step
+def test_defmt_nonfinite_timeout_direct_dispatch(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, timeout_s: float) -> None:
+        from agentic_hil.test_reactor import build_test_step
 
-    config = uart_config(tmp_path)
-    service = RecordingService(fail_call="com_read")
-    step = build_test_step({"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s})
-    result = TestReactor(config, service).execute_step(step)  # type: ignore[arg-type]
+        config = uart_config(tmp_path)
+        service = RecordingService(fail_call="com_read")
+        step = build_test_step({"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s})
+        result = TestReactor(config, service).execute_step(step)  # type: ignore[arg-type]
 
-    if result.get("error_type") != "invalid_argument":
-        raise AssertionError("Nonfinite defmt timeout_s must return invalid_argument before hardware access.")
-    assert result["ok"] is False
-    assert result["field"] == "timeout_s"
-    assert service.calls == []
+        if result.get("error_type") != "invalid_argument":
+            raise AssertionError("Nonfinite defmt timeout_s must return invalid_argument before hardware access.")
+        assert result["ok"] is False
+        assert result["field"] == "timeout_s"
+        assert service.calls == []
+
+    rows = parameter_rows([pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_valid_defmt_plan_is_not_executable_yet(tmp_path: Path) -> None:

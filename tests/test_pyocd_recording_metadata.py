@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from parameter_rows import check_parameter_rows, parameter_rows
 
 from tests.bench import pyocd_recordings, usb_reset_support
 
@@ -323,9 +324,26 @@ def test_pyocd_run_stop_keeps_a_failed_recovery_verdict_even_if_stop_closed_the_
     assert pyocd_recordings.run_stop_succeeded(evidence["run_stop"]) is False
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
+def test_pyocd_run_stop_uses_the_product_continue_predicate(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, field: str, value: object) -> None:
+        result = {
+            "ok": True,
+            "target_ok": None,
+            "audit_ok": True,
+            "cleanup_ok": True,
+            "cleanup_required": False,
+            "quarantined": False,
+            "lease_state": "released",
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        }
+        result[field] = value
+
+        evidence = pyocd_recordings.run_stop_evidence(result, ())
+
+        assert pyocd_recordings.run_stop_succeeded(evidence) is False
+
+    rows = parameter_rows([
         ("ok", False),
         ("target_ok", False),
         ("audit_ok", False),
@@ -336,25 +354,8 @@ def test_pyocd_run_stop_keeps_a_failed_recovery_verdict_even_if_stop_closed_the_
         ("side_effect_status", "unknown"),
         ("side_effect_status", "partial"),
         ("hardware_state", "unknown"),
-    ],
-)
-def test_pyocd_run_stop_uses_the_product_continue_predicate(field: str, value: object) -> None:
-    result = {
-        "ok": True,
-        "target_ok": None,
-        "audit_ok": True,
-        "cleanup_ok": True,
-        "cleanup_required": False,
-        "quarantined": False,
-        "lease_state": "released",
-        "side_effect_status": "not_started",
-        "hardware_state": "unchanged",
-    }
-    result[field] = value
-
-    evidence = pyocd_recordings.run_stop_evidence(result, ())
-
-    assert pyocd_recordings.run_stop_succeeded(evidence) is False
+    ], multiple=True, ids=['ok-False', 'target_ok-False', 'audit_ok-False', 'cleanup_ok-False', 'cleanup_required-True', 'quarantined-True', 'lease_state-stale', 'side_effect_status-unknown', 'side_effect_status-partial', 'hardware_state-unknown'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_pyocd_run_stop_accepts_recovered_outcome_when_incident_is_closed() -> None:
@@ -470,9 +471,14 @@ def test_pyocd_run_closure_accepts_clean_after_status_and_successful_stop() -> N
     assert pyocd_recordings.run_closure_succeeded(evidence) is True
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
+def test_pyocd_run_closure_rejects_unclean_after_status(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, field: str, value: object) -> None:
+        evidence = _clean_run_closure_evidence()
+        evidence["lease_status_after_stop"][field] = value
+
+        assert pyocd_recordings.run_closure_succeeded(evidence) is False
+
+    rows = parameter_rows([
         ("available", False),
         ("ok", False),
         ("target_ok", False),
@@ -487,35 +493,30 @@ def test_pyocd_run_closure_accepts_clean_after_status_and_successful_stop() -> N
         ("blocked", True),
         ("incident_stands", True),
         ("standing_incidents", [{"summary": "unresolved incident"}]),
-    ],
-)
-def test_pyocd_run_closure_rejects_unclean_after_status(field: str, value: object) -> None:
-    evidence = _clean_run_closure_evidence()
-    evidence["lease_status_after_stop"][field] = value
-
-    assert pyocd_recordings.run_closure_succeeded(evidence) is False
+    ], multiple=True, ids=['available-False', 'ok-False', 'target_ok-False', 'audit_ok-False', 'cleanup_ok-False', 'cleanup_required-True', 'quarantined-True', 'lease_state-stale', 'side_effect_status-unknown', 'side_effect_status-partial', 'hardware_state-unknown', 'blocked-True', 'incident_stands-True', 'standing_incidents-value13'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    "failed_status",
-    [None, {"ok": False, "error_type": "backend_error", "summary": "status unavailable"}, OSError("private path /dev/ttyACM0")],
-)
-def test_pyocd_run_stop_marks_failed_status_unavailable_without_skipping_stop(failed_status) -> None:
-    server = FakeLeaseStatusServer(
-        [
-            failed_status,
-            {"ok": True, "released_devices": [], "recovery": {"attempted": False, "outcome": "skipped"}},
-            failed_status,
-        ]
-    )
+def test_pyocd_run_stop_marks_failed_status_unavailable_without_skipping_stop(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, failed_status) -> None:
+        server = FakeLeaseStatusServer(
+            [
+                failed_status,
+                {"ok": True, "released_devices": [], "recovery": {"attempted": False, "outcome": "skipped"}},
+                failed_status,
+            ]
+        )
 
-    evidence = pyocd_recordings.capture_run_stop_with_lease_evidence(server, ("/dev/ttyACM0",))
+        evidence = pyocd_recordings.capture_run_stop_with_lease_evidence(server, ("/dev/ttyACM0",))
 
-    assert server.calls == ["hardware_lease_status", "bench_run_stop", "hardware_lease_status"]
-    assert evidence["lease_status_before_stop"]["available"] is False
-    assert evidence["run_stop"]["ok"] is True
-    assert evidence["lease_status_after_stop"]["available"] is False
-    assert "/dev/ttyACM0" not in json.dumps(evidence)
+        assert server.calls == ["hardware_lease_status", "bench_run_stop", "hardware_lease_status"]
+        assert evidence["lease_status_before_stop"]["available"] is False
+        assert evidence["run_stop"]["ok"] is True
+        assert evidence["lease_status_after_stop"]["available"] is False
+        assert "/dev/ttyACM0" not in json.dumps(evidence)
+
+    rows = parameter_rows([None, {"ok": False, "error_type": "backend_error", "summary": "status unavailable"}, OSError("private path /dev/ttyACM0")], ids=['None', 'failed_status1', 'failed_status2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 class FakePyOcdServer:
@@ -782,9 +783,40 @@ def test_pyocd_discovery_reset_rejects_a_replaced_or_dead_mcp_process(monkeypatc
     assert "pyocd_discovery_after_usb_reset_v1" not in properties
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
+def test_pyocd_discovery_reset_refuses_unsafe_failure_before_any_reset(tmp_path: Path) -> None:
+    def check_row(_workspace, monkeypatch, field, value) -> None:
+        unsafe = _safe_pyocd_usb_timeout()
+        unsafe[field] = value
+        events: list[tuple] = []
+        server = FakePyOcdServer([unsafe], events)
+        properties: dict[str, str] = {}
+        identity = SimpleNamespace(serial_number="SERIAL-7", vid="0483", pid="374b")
+        monkeypatch.setattr(
+            usb_reset_support,
+            "reset_usb_device",
+            lambda _identity: events.append(("reset",)),
+        )
+        monkeypatch.setattr(
+            usb_reset_support,
+            "wait_for_usb_device",
+            lambda **_kwargs: events.append(("wait",)),
+        )
+
+        with pytest.raises(pytest.fail.Exception, match="initial debugger_probes_list"):
+            pyocd_recordings.pyocd_discovery_after_usb_reset(
+                server,
+                SimpleNamespace(project=Path("."), state_root=Path(".")),
+                expected_serial="SERIAL-7",
+                usb_identity=identity,
+                private_values=("SERIAL-7",),
+                record_property=lambda name, value: properties.__setitem__(name, value),
+            )
+
+        assert [event[0] for event in events] == ["mcp"]
+        assert "pyocd_discovery_before_usb_reset_v1" in properties
+        assert "pyocd_discovery_after_usb_reset_v1" not in properties
+
+    rows = parameter_rows([
         ("target_contacted", True),
         ("target_ok", False),
         ("retry_safe", False),
@@ -805,36 +837,5 @@ def test_pyocd_discovery_reset_rejects_a_replaced_or_dead_mcp_process(monkeypatc
                 "returncode": 1,
             },
         ),
-    ],
-)
-def test_pyocd_discovery_reset_refuses_unsafe_failure_before_any_reset(monkeypatch, field, value) -> None:
-    unsafe = _safe_pyocd_usb_timeout()
-    unsafe[field] = value
-    events: list[tuple] = []
-    server = FakePyOcdServer([unsafe], events)
-    properties: dict[str, str] = {}
-    identity = SimpleNamespace(serial_number="SERIAL-7", vid="0483", pid="374b")
-    monkeypatch.setattr(
-        usb_reset_support,
-        "reset_usb_device",
-        lambda _identity: events.append(("reset",)),
-    )
-    monkeypatch.setattr(
-        usb_reset_support,
-        "wait_for_usb_device",
-        lambda **_kwargs: events.append(("wait",)),
-    )
-
-    with pytest.raises(pytest.fail.Exception, match="initial debugger_probes_list"):
-        pyocd_recordings.pyocd_discovery_after_usb_reset(
-            server,
-            SimpleNamespace(project=Path("."), state_root=Path(".")),
-            expected_serial="SERIAL-7",
-            usb_identity=identity,
-            private_values=("SERIAL-7",),
-            record_property=lambda name, value: properties.__setitem__(name, value),
-        )
-
-    assert [event[0] for event in events] == ["mcp"]
-    assert "pyocd_discovery_before_usb_reset_v1" in properties
-    assert "pyocd_discovery_after_usb_reset_v1" not in properties
+    ], multiple=True, ids=['target_contacted-True', 'target_ok-False', 'retry_safe-False', 'side_effect_status-partial', 'hardware_state-unknown', 'audit_ok-False', 'cleanup_ok-False', 'cleanup_required-True', 'quarantined-True', 'lease_state-stale', 'error_type-backend_timeout', 'programmer_output-value11', 'programmer_output-value12'])
+    check_parameter_rows(tmp_path, rows, check_row)
