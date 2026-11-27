@@ -13,14 +13,14 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     env:
-      SUBJECT: ae4238615eff7de59c8f5ec13059ff619d018303
+      SUBJECT: e0b1c828e9b92ec01c45843eeb553e1f764af097
       RUSTUP_TOOLCHAIN: 1.97.0
       PYYAML_FORCE_LIBYAML: "0"
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ae4238615eff7de59c8f5ec13059ff619d018303
+          ref: e0b1c828e9b92ec01c45843eeb553e1f764af097
           persist-credentials: false
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
