@@ -1,0 +1,105 @@
+name: Measure the pip-present and pip-free suites for issue 935
+
+on:
+  push:
+    branches: [task/935-pip-pair-20261127]
+
+permissions:
+  contents: read
+
+jobs:
+  pair:
+    name: Both pip variants on one Windows host
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      SUBJECT: ae4238615eff7de59c8f5ec13059ff619d018303
+      RUSTUP_TOOLCHAIN: 1.97.0
+      PYYAML_FORCE_LIBYAML: "0"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ae4238615eff7de59c8f5ec13059ff619d018303
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.13.14"
+
+      - name: Prepare and compare two isolated interpreters
+        id: prepare
+        shell: pwsh
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $env:RUNNER_TEMP 'pip-pair-results'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          if ((git rev-parse HEAD) -ne $env:SUBJECT) { throw 'Unexpected source revision' }
+          foreach ($variant in @('with-pip', 'without-pip')) {
+            $directory = if ($variant -eq 'with-pip') { 'C:/t/n935yp' } else { 'C:/t/n935np' }
+            $python = "$directory/Scripts/python.exe"
+            python -m venv $directory
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            & $python -m pip install --require-hashes -r requirements/dev.txt
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            & $python -m pip install --no-deps -e .
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            if ($variant -eq 'without-pip') {
+              & $python -m pip uninstall --yes pip
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            }
+            & $python -I -c "import importlib.metadata as m, importlib.util as u, json, platform, sys; print(json.dumps(dict(pip=u.find_spec('pip') is not None, python=platform.python_version(), interpreter=sys.executable, packages={d.metadata['Name'].lower():d.version for d in m.distributions()}), sort_keys=True))" | Set-Content "$evidence/$variant-environment.json" -Encoding utf8
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          $withPip = Get-Content "$evidence/with-pip-environment.json" -Raw | ConvertFrom-Json -AsHashtable
+          $withoutPip = Get-Content "$evidence/without-pip-environment.json" -Raw | ConvertFrom-Json -AsHashtable
+          if (-not $withPip.pip -or $withoutPip.pip -or $withPip.python -ne $withoutPip.python) { throw 'Invalid interpreter pair' }
+          $withPip.packages.Remove('pip')
+          if (($withPip.packages | ConvertTo-Json -Compress) -ne ($withoutPip.packages | ConvertTo-Json -Compress)) { throw 'Distributions differ beyond pip' }
+          [ordered]@{revision=$env:SUBJECT; run=$env:GITHUB_RUN_ID; machine=$env:COMPUTERNAME; image=$env:ImageVersion; processors=[Environment]::ProcessorCount; sequence=@('with-pip','without-pip')} | ConvertTo-Json | Set-Content "$evidence/host.json" -Encoding utf8
+          rustup toolchain install 1.97.0 --profile minimal --target thumbv7em-none-eabihf
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Run both complete suites consecutively
+        shell: pwsh
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $env:RUNNER_TEMP 'pip-pair-results'
+          $codes = @()
+          foreach ($variant in @('with-pip', 'without-pip')) {
+            $directory = if ($variant -eq 'with-pip') { 'C:/t/n935yp' } else { 'C:/t/n935np' }
+            $python = "$directory/Scripts/python.exe"
+            # Nested pytest processes use the same environment as the outer suite.
+            $previousPath = $env:PATH
+            $env:PATH = "$directory/Scripts;$previousPath"
+            $env:VIRTUAL_ENV = $directory
+            & $python -m pytest --collect-only -q | Out-File "$evidence/$variant-collection.txt" -Encoding utf8
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            $arguments = @('-n','auto','--durations=30',"--basetemp=$env:RUNNER_TEMP/pair-$variant","--junitxml=$evidence/$variant.xml")
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            $started = [DateTimeOffset]::UtcNow.ToString('o')
+            & $python -m pytest @arguments
+            $code = $LASTEXITCODE
+            $timer.Stop()
+            $codes += $code
+            [ordered]@{revision=$env:SUBJECT; variant=$variant; interpreter=$python; arguments=$arguments; started=$started; finished=[DateTimeOffset]::UtcNow.ToString('o'); elapsed_seconds=$timer.Elapsed.TotalSeconds; exit_code=$code} | ConvertTo-Json | Set-Content "$evidence/$variant-receipt.json" -Encoding utf8
+            $env:PATH = $previousPath
+          }
+          if (($codes | Where-Object { $_ -ne 0 }).Count) { exit 1 }
+
+      - name: Preserve original evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: issue-935-same-host-pip-pair
+          path: ${{ runner.temp }}/pip-pair-results
+          if-no-files-found: error
+          retention-days: 14
