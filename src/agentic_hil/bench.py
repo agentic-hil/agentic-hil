@@ -93,6 +93,7 @@ MAX_WAIT_S = 900.0
 PHYSICAL_RESOURCE_PREFIXES = ("physical:", "probe:", "probe-exe:", "com:", "can:")
 
 _LOCAL_LOCKS: set[str] = set()
+_LOCAL_SHARED_LOCKS: dict[str, int] = {}
 _LOCAL_LOCKS_GUARD = threading.Lock()
 
 
@@ -101,19 +102,26 @@ def utc_now_iso() -> str:
 
 
 class _LifetimeLock:
-    def __init__(self, path: Path, mode: int | None = None):
+    def __init__(self, path: Path, mode: int | None = None, *, shared: bool = False):
         self.path = path
         self.mode = mode
+        self.shared = shared
         self.descriptor = -1
         self.directory_handles: list[int] = []
         self.locked = False
         self.local_key = os.path.normcase(str(path))
+        self._registered = False
 
     def acquire(self) -> None:
         with _LOCAL_LOCKS_GUARD:
-            if self.local_key in _LOCAL_LOCKS:
+            readers = _LOCAL_SHARED_LOCKS.get(self.local_key, 0)
+            if self._registered or self.local_key in _LOCAL_LOCKS or (readers and not self.shared):
                 raise BlockingIOError(f"Lock is already held in this process: {self.path}")
-            _LOCAL_LOCKS.add(self.local_key)
+            if self.shared:
+                _LOCAL_SHARED_LOCKS[self.local_key] = readers + 1
+            else:
+                _LOCAL_LOCKS.add(self.local_key)
+            self._registered = True
         try:
             if os.name == "nt":
                 self.directory_handles = _windows_hold_directory_chain(self.path.parent)
@@ -126,9 +134,10 @@ class _LifetimeLock:
                 raise OSError("Coordination lock is not a single-link regular file.")
             if self.mode is not None and os.name != "nt" and opened.st_uid == os.geteuid() and stat.S_IMODE(opened.st_mode) != self.mode:
                 os.fchmod(self.descriptor, self.mode)
-            if os.name == "nt":
-                if opened.st_size == 0:
-                    os.write(self.descriptor, b"0")
+            if os.name == "nt" and self.shared:
+                _windows_shared_lock(self.descriptor, acquire=True)
+                self.locked = True
+            elif os.name == "nt":
                 os.lseek(self.descriptor, 0, os.SEEK_SET)
                 import msvcrt
 
@@ -137,7 +146,8 @@ class _LifetimeLock:
             else:
                 import fcntl
 
-                fcntl.flock(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                operation = fcntl.LOCK_SH if self.shared else fcntl.LOCK_EX
+                fcntl.flock(self.descriptor, operation | fcntl.LOCK_NB)
                 self.locked = True
         except BaseException:
             self.release()
@@ -148,7 +158,9 @@ class _LifetimeLock:
         if self.descriptor >= 0:
             descriptor = self.descriptor
             try:
-                if self.locked and os.name == "nt":
+                if self.locked and os.name == "nt" and self.shared:
+                    _windows_shared_lock(descriptor, acquire=False)
+                elif self.locked and os.name == "nt":
                     import msvcrt
 
                     os.lseek(descriptor, 0, os.SEEK_SET)
@@ -180,11 +192,49 @@ class _LifetimeLock:
             errors.append(error)
         finally:
             self.directory_handles.clear()
-            if self.descriptor < 0:
+            if self.descriptor < 0 and self._registered:
                 with _LOCAL_LOCKS_GUARD:
-                    _LOCAL_LOCKS.discard(self.local_key)
+                    if self.shared:
+                        readers = _LOCAL_SHARED_LOCKS[self.local_key] - 1
+                        if readers:
+                            _LOCAL_SHARED_LOCKS[self.local_key] = readers
+                        else:
+                            del _LOCAL_SHARED_LOCKS[self.local_key]
+                    else:
+                        _LOCAL_LOCKS.discard(self.local_key)
+                    self._registered = False
         if errors:
             raise errors[0]
+
+
+def _windows_shared_lock(descriptor: int, *, acquire: bool) -> None:
+    """Lock byte zero in shared mode, the same range as msvcrt's exclusive lock."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    overlap = Overlapped()
+    handle = msvcrt.get_osfhandle(descriptor)  # type: ignore[attr-defined]
+    if acquire:
+        operation = kernel.LockFileEx
+        operation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+        operation.restype = wintypes.BOOL
+        ok = operation(handle, 1, 0, 1, 0, ctypes.byref(overlap))  # LOCKFILE_FAIL_IMMEDIATELY
+    else:
+        operation = kernel.UnlockFileEx
+        operation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+        operation.restype = wintypes.BOOL
+        ok = operation(handle, 0, 1, 0, ctypes.byref(overlap))
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
 
 
 class DeviceBusyError(RuntimeError):

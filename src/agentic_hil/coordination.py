@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import secrets
 import threading
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,7 +58,7 @@ DEBUGGER_DISCOVERY_RESOURCE = "debugger-discovery:all"
 # Absolute paths under the environment-derived state_root / config location are
 # kept in the on-disk record for incident matching, but never emitted to an
 # operator or MCP sink.
-_RECORD_OUTPUT_HIDDEN_KEYS = ("config_path", "workspace")
+_RECORD_OUTPUT_HIDDEN_KEYS = ("config_path", "workspace", "owner_workspace", "owners")
 LEASE_RELEASE_RETRY_REASON = "lease_release_unconfirmed"
 # A one-shot that only ever reads (probe discovery, probe_target) and whose
 # result *names* its abort point before the target: the board is where the last
@@ -206,7 +209,7 @@ AUDIT_BROKEN_MARKER = "audit_broken"
 # everywhere else in a record before it is written, but never in these: a path or
 # an id that holds a serial by chance is still the one a later process looks its
 # own project up by, and a masked copy of it would match nothing.
-RECORD_MATCH_KEYS = frozenset({"workspace", "config_path", "project_resource", "resources", "owner_marker", "config_sha256", "quarantine_id", "lease_id"})
+RECORD_MATCH_KEYS = frozenset({"workspace", "owner_workspace", "config_path", "project_resource", "resources", "owner_marker", "config_sha256", "quarantine_id", "lease_id"})
 
 
 def _public_record(record: JsonObject | None) -> JsonObject | None:
@@ -468,11 +471,15 @@ class CoordinationError(RuntimeError):
 
 
 class HardwareLease:
-    def __init__(self, coordinator: HardwareCoordinator, lease_id: str, resources: list[str], locks: list[_LifetimeLock], bench_resources: list[str] | None = None):
+    def __init__(
+        self, coordinator: HardwareCoordinator, lease_id: str, resources: list[str],
+        locks: list[_LifetimeLock], bench_resources: list[str] | None = None, *, shared_discovery: bool = False,
+    ):
         self.coordinator = coordinator
         self.lease_id = lease_id
         self.resources = resources
         self.locks = locks
+        self.shared_discovery = shared_discovery
         # Devices whose machine-wide hold this lease took itself, and must give
         # back. Inside a declared run the hold belongs to the run, so this is
         # empty and the run outlives every call it contains.
@@ -492,6 +499,10 @@ class HardwareLease:
         self.cleanup_events: list[JsonObject] = []
         self.quarantine_id: str | None = None
         self.valid = True
+
+    @property
+    def record_resources(self) -> list[str]:
+        return [resource for resource in self.resources if not (self.shared_discovery and resource == DEBUGGER_DISCOVERY_RESOURCE)]
 
     def release(self, *, safe_state_confirmed: bool = True, processes_reaped: bool = True, audit_ok: bool = True) -> bool:
         return self.coordinator.release_lease(
@@ -627,7 +638,11 @@ class HardwareCoordinator:
             project_resource(config), str(Path(config.work_dir).resolve()), str(Path(config.config_path).resolve()),
         )
         self.project_key = self.ownership.project_resource
+        self.concurrent_bench = config.bench_ownership is not None or config.server is not None
+        # For a shared bench this is the owner's lifetime lock. The common
+        # project lock is held separately for durable record transitions.
         self.project_lock: _LifetimeLock | None = None
+        self._updating_project = False
         # Exclusivity is machine-wide and keyed on the physical device, so it
         # cannot live beside the per-configuration state under state_root; see
         # agentic_hil.bench for where it lives and why.
@@ -935,7 +950,7 @@ class HardwareCoordinator:
             return []
         return [resource for resource in resources if is_physical_resource(resource) and resource not in declared]
 
-    def acquire(self, *resources: Device | str, for_recovery: bool = False) -> HardwareLease:
+    def acquire(self, *resources: Device | str, for_recovery: bool = False, exclusive_discovery: bool = False) -> HardwareLease:
         """Take a lease on the named devices for the length of one call.
 
         Backends hand devices, not derived names: the lock reference belongs in
@@ -959,7 +974,8 @@ class HardwareCoordinator:
         # the run began (see `UartDevice.lock_keys`). The lease still takes them
         # all.
         claimed = sorted({key for key in declared_keys(resources) if key})
-        with self._guard:
+        shared_discovery = not exclusive_discovery and _probe_effect(normalized)
+        with self._guard, self._project_update(normalized):
             self._require_open()
             self.settle_external_recovery()
             undeclared = self._undeclared(claimed)
@@ -982,9 +998,15 @@ class HardwareCoordinator:
                 )
             if self.incident_stands and not for_recovery:
                 raise CoordinationError(self._quarantined_result(normalized, "Current owner has unresolved cleanup or audit state."))
+            if self.concurrent_bench:
+                self._settle_bench_owners()
+                incident = self._standing_record()
+                if incident is not None and not (for_recovery and incident.get("quarantine_id") == self.quarantine_id):
+                    raise CoordinationError(self._standing_refusal(incident, normalized))
             acquired_project = False
             if self.project_lock is None:
-                self.project_lock = self._acquire_lock(self.project_key, normalized)
+                owner_key = self._owner_key(self.owner_marker) if self.concurrent_bench else self.project_key
+                self.project_lock = self._acquire_lock(owner_key, normalized)
                 acquired_project = True
                 try:
                     stale = self._read_record(self.project_key)
@@ -1019,10 +1041,11 @@ class HardwareCoordinator:
                     # teardown exactly as it does for an incident raised here.
             locks: list[_LifetimeLock] = []
             bench_taken: list[str] = []
+            lease: HardwareLease | None = None
             try:
                 for resource in normalized:
                     try:
-                        lock = self._acquire_lock(resource, normalized)
+                        lock = self._lock_resource(resource, normalized, shared_discovery)
                     except CoordinationError as error:
                         # #501: a second session on a resource THIS owner already
                         # holds reaches here, because the project lock is already
@@ -1049,6 +1072,10 @@ class HardwareCoordinator:
                         if not self._record_matches_project(stale):
                             raise CoordinationError(self._foreign_incident_refusal(resource, stale))
                         stale_resources = [item for item in stale.get("resources", []) if isinstance(item, str)] or [resource]
+                        if self.concurrent_bench and stale.get("owner_workspace"):
+                            # Each dead owner's other devices retain their own
+                            # markers until a caller reaches for them.
+                            stale_resources = sorted(set(stale_resources).intersection(normalized))
                         self._adopt_incident(stale, stale_resources, "owner_process_exited_without_release")
                         if self.incident_stands:
                             self._persist_project("cleanup_required", stale_resources)
@@ -1070,12 +1097,14 @@ class HardwareCoordinator:
                 # acquire and a run's own hold survives the calls inside it.
                 bench_taken = physical_resources(normalized)
                 self.bench.heartbeat()
-                lease = HardwareLease(self, secrets.token_hex(16), normalized, locks, bench_resources=bench_taken)
+                lease = HardwareLease(self, secrets.token_hex(16), normalized, locks, bench_resources=bench_taken, shared_discovery=shared_discovery)
                 self.leases[lease.lease_id] = lease
                 self._persist_lease(lease)
                 self._persist_project("active")
                 return lease
             except BaseException:
+                if lease is not None:
+                    self.leases.pop(lease.lease_id, None)
                 if bench_taken:
                     self.bench.release(bench_taken)
                 for lock in reversed(locks):
@@ -1107,6 +1136,7 @@ class HardwareCoordinator:
         second time, and its bench hold is counted once more, the way a call
         inside a run counts the run's."""
         normalized = sorted({resource for resource in resources if resource})
+        shared_discovery = _probe_effect(normalized)
         with self._guard:
             self._require_open()
             held = {resource for lease in self.leases.values() for resource in lease.resources}
@@ -1115,7 +1145,7 @@ class HardwareCoordinator:
                 for resource in normalized:
                     if resource in held:
                         continue
-                    locks.append(self._acquire_lock(resource, normalized))
+                    locks.append(self._lock_resource(resource, normalized, shared_discovery))
                     record = self._read_record(resource)
                     if record is not None and record.get("state") not in {None, "released"} and not self._record_matches_project(record):
                         raise CoordinationError(self._foreign_incident_refusal(resource, record))
@@ -1144,7 +1174,7 @@ class HardwareCoordinator:
         processes_reaped: bool,
         audit_ok: bool,
     ) -> bool:
-        with self._guard:
+        with self._guard, self._project_update(lease.resources):
             if not self._valid_lease(lease):
                 lease.valid = False
                 lease.state = "stale"
@@ -1166,12 +1196,12 @@ class HardwareCoordinator:
             # Resources of THIS lease leave the incident on a clean release; an
             # adopted lease-less incident (residual) must keep the project blocked
             # so a successful unrelated release cannot erase it.
-            residual_incident = self.incident_resources - set(lease.resources)
+            residual_incident = self.incident_resources - set(lease.record_resources)
             try:
                 self._persist_lease(lease, state="released")
                 blocked_after = any(item.state in {"cleanup_required", "quarantined"} for item in remaining.values()) or bool(residual_incident)
                 if blocked_after:
-                    incident_after = sorted(residual_incident | {resource for item in remaining.values() for resource in item.resources})
+                    incident_after = sorted(residual_incident | {resource for item in remaining.values() for resource in item.record_resources})
                     self._persist_project("cleanup_required", incident_after, leases=remaining)
                     # Re-normalize sibling quarantined markers down to the shrunken
                     # incident set; otherwise a marker still listing the released
@@ -1229,7 +1259,7 @@ class HardwareCoordinator:
         )
 
     def quarantine_lease(self, lease: HardwareLease, reason: str, error: object | None = None, *, audit_broken: bool = False) -> None:
-        with self._guard:
+        with self._guard, self._project_update(lease.resources):
             if not self._valid_lease(lease):
                 lease.valid = False
                 lease.state = "stale"
@@ -1282,7 +1312,7 @@ class HardwareCoordinator:
         False, and nothing changed, for a lease this does not apply to: no
         standing incident, a lease that is not in cleanup state, or one that is
         not this owner's."""
-        with self._guard:
+        with self._guard, self._project_update():
             if not isinstance(lease, HardwareLease) or not self.incident_stands or lease.state not in {"cleanup_required", "quarantined"} or not self._valid_lease(lease):
                 return False
             remaining = {lease_id: item for lease_id, item in self.leases.items() if lease_id != lease.lease_id}
@@ -1359,6 +1389,10 @@ class HardwareCoordinator:
         with self._guard:
             if self._state != "open" or not self.blocked or self.audit_incident:
                 return None
+            return self._stand_down()
+
+    def _stand_down(self) -> JsonObject | None:
+        with self._project_update():
             reasons = sorted({reason for lease in self.leases.values() for reason in lease.cleanup_reasons()})
             if not reasons:
                 try:
@@ -1416,6 +1450,8 @@ class HardwareCoordinator:
                     for lease in self.leases.values():
                         self._persist_lease(lease)
                     self._persist_project("active")
+                elif self.concurrent_bench:
+                    self._replace_bench_owner(self.owner_marker, released)
                 else:
                     self._write_record(self.project_key, released)
             except (CoordinationError, ConfigError, OSError, ValueError):
@@ -1461,7 +1497,7 @@ class HardwareCoordinator:
         return True
 
     def resolve_retryable_cleanup(self, lease: HardwareLease, reason: str, *, allowed: frozenset[str] | None = None) -> bool:
-        with self._guard:
+        with self._guard, self._project_update(lease.resources):
             if not self._valid_lease(lease):
                 lease.valid = False
                 lease.state = "stale"
@@ -1604,7 +1640,7 @@ class HardwareCoordinator:
         if not isinstance(self.quarantine_id, str) or not self.quarantine_id:
             return None
         try:
-            record = self._read_record(self.project_key)
+            record = self._incident_record(self.quarantine_id)
         except CoordinationError:
             # An unreadable record answers nothing, which is not the same as
             # answering "settled".
@@ -1715,7 +1751,7 @@ class HardwareCoordinator:
         return True
 
     def poison(self, reason: str, error: object | None = None, *, audit_broken: bool = False, resources: list[str] | None = None) -> None:
-        with self._guard:
+        with self._guard, self._project_update(resources):
             self._require_open()
             if self.leases:
                 # Every still-registered lease is quarantined, no matter which
@@ -1729,8 +1765,11 @@ class HardwareCoordinator:
             self.blocked = True
             self.audit_incident = self.audit_incident or audit_broken
             self.incident_resources.update(resources or [])
+            if self.concurrent_bench:
+                self.adopted_reason = reason
             if self.project_lock is None:
-                self.project_lock = self._acquire_lock(self.project_key, resources or [self.project_key])
+                owner_key = self._owner_key(self.owner_marker) if self.concurrent_bench else self.project_key
+                self.project_lock = self._acquire_lock(owner_key, resources or [self.project_key])
             self._persist_project("cleanup_required", sorted(self.incident_resources))
 
     def status(self, *, settle_dead_owner: bool = True) -> JsonObject:
@@ -1750,7 +1789,31 @@ class HardwareCoordinator:
             released_dead_owner: JsonObject | None = None
             pending_dead_owner: JsonObject | None = None
             unsettled_dead_owner = False
-            if owner_active:
+            if self.concurrent_bench:
+                try:
+                    with self._project_update():
+                        if settle_dead_owner:
+                            released_dead_owner = self._settle_bench_owners()
+                        project = self._read_record(self.project_key)
+                        owners = self._bench_owners(project)
+                        live_owners = {marker for marker in owners if self._owner_is_live(marker)}
+                        owner_active = owner_active or bool(live_owners)
+                        record = self._standing_record(project) or project
+                        if record is None or record.get("state") == "released":
+                            record = owners.get(self.owner_marker) or next(iter(owners.values()), record)
+                        if record and record.get("state") == "active" and record.get("owner_marker") not in live_owners:
+                            if settle_dead_owner and record is project:
+                                record, released_dead_owner = self._settle_legacy_project_owner(record)
+                            else:
+                                pending_dead_owner = self._dead_owner_made_no_contact(record)
+                                unsettled_dead_owner = pending_dead_owner is None
+                except CoordinationError as error:
+                    if error.result.get("error_type") != "resource_busy":
+                        raise
+                    owner_active = True
+                    snapshot_atomic = False
+                    record = self._read_record(self.project_key)
+            elif owner_active:
                 record = self._read_record(self.project_key)
             else:
                 probe = self._project_probe_lock()
@@ -1773,27 +1836,7 @@ class HardwareCoordinator:
                             pending_dead_owner = self._dead_owner_made_no_contact(record)
                             unsettled_dead_owner = pending_dead_owner is None
                         elif record is not None and record.get("state") == "active":
-                            stale_resources = [item for item in record.get("resources", []) if isinstance(item, str)]
-                            finding = self._dead_owner_made_no_contact(record)
-                            released = self._release_dead_owner(finding) if finding is not None else None
-                            if released is not None and finding is not None:
-                                record = released
-                                released_dead_owner = finding
-                            else:
-                                self._adopt_incident(record, stale_resources, "owner_process_exited_without_release")
-                                record = {**record, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release", "quarantine_id": self.quarantine_id}
-                                self._write_record(self.project_key, record)
-                                self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
-                                # Adopted and recorded, and deliberately not
-                                # ended here. This is a read, and the incident it
-                                # inherits names a target a recovery action can
-                                # still answer for: reap, reset into halt, read
-                                # it back. A status call runs none of those, so
-                                # ending the incident here would throw away the
-                                # one thing that could have settled it. The next
-                                # hardware call is where it goes, either because
-                                # the recovery action settled it or because the
-                                # seam at the end of that call stood it down.
+                            record, released_dead_owner = self._settle_legacy_project_owner(record)
                     finally:
                         probe.release()
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
@@ -1843,7 +1886,11 @@ class HardwareCoordinator:
                 "cleanup_reasons": reasons,
                 "auto_recoverable": blocked and bool(reasons) and all(reason in self.recoverable_reasons() for reason in reasons),
                 "auto_recover_policy": self.config.recovery.auto_recover,
-                "quarantine_id": self.quarantine_id or (record or {}).get("quarantine_id"),
+                "quarantine_id": (
+                    (record or {}).get("quarantine_id")
+                    if self.concurrent_bench and blocked_state and record_audit_broken(record)
+                    else self.quarantine_id or (record or {}).get("quarantine_id")
+                ),
                 "lifecycle_state": self._state,
                 # Strip secret-named fields AND the absolute env-derived paths
                 # (config_path, workspace) before the record reaches an operator
@@ -1869,6 +1916,24 @@ class HardwareCoordinator:
                 # the record itself carries reasons, never versioned prose.
                 result = attach_quarantine_guidance({**result, "cleanup_required": True})
             return _with_status_sentences(result)
+
+    def _settle_legacy_project_owner(self, record: JsonObject) -> tuple[JsonObject, JsonObject | None]:
+        finding = self._dead_owner_made_no_contact(record)
+        released = self._release_dead_owner(finding) if finding is not None else None
+        if released is not None:
+            return released, finding
+        resources = list(record.get("resources", []))
+        reason = "owner_process_exited_without_release"
+        # A status read opens the incident but leaves hardware verification
+        # and stand-down to the next call.
+        self._adopt_incident(record, resources, reason)
+        incident = {
+            **record, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(),
+            "reason": reason, "quarantine_id": self.quarantine_id,
+        }
+        self._write_record(self.project_key, incident)
+        self._mark_incident_resources(resources, reason, expected_project=self.project_key)
+        return incident, None
 
     def _dead_owner_made_no_contact(self, record: JsonObject) -> JsonObject | None:
         """What the dead owner's own last record proves about its hardware, or ``None``.
@@ -1948,7 +2013,9 @@ class HardwareCoordinator:
         if not resources or resources != sorted({item for item in record.get("resources", []) if isinstance(item, str)}):
             return None
         try:
-            state = read_report_state(self.config)
+            workspace = record.get("owner_workspace", record.get("workspace"))
+            config = replace(self.config, work_dir=workspace, workspace_root=workspace) if isinstance(workspace, str) else self.config
+            state = read_report_state(config)
         except (ConfigError, OSError, ValueError):
             # An unreadable report state answers nothing, which is not the same
             # as answering "no contact".
@@ -1993,7 +2060,7 @@ class HardwareCoordinator:
             },
         }
 
-    def _release_dead_owner(self, finding: JsonObject) -> JsonObject | None:
+    def _release_dead_owner(self, finding: JsonObject, *, owner: JsonObject | None = None) -> JsonObject | None:
         """Hand the dead owner's devices back, or ``None`` and let it quarantine.
 
         Every failure here is a non-answer rather than a partial release: the
@@ -2007,16 +2074,24 @@ class HardwareCoordinator:
         resources = [item for item in finding.get("resources", []) if isinstance(item, str)]
         if not resources:
             return None
+        tracked = [
+            resource for resource in resources
+            if resource != DEBUGGER_DISCOVERY_RESOURCE or not (owner or {}).get("shared_discovery")
+        ]
         locks: list[_LifetimeLock] = []
         try:
-            for resource in sorted(set(resources)):
+            for resource in tracked:
                 locks.append(self._acquire_lock(resource, resources))
                 marker = self._read_record(resource)
                 if marker is None or marker.get("state") in {None, "released"}:
                     continue
                 # A marker that is not this lease's active hold is a state this
                 # finding did not examine and cannot speak for.
-                if marker.get("state") != "active" or marker.get("lease_id") != finding.get("lease_id") or not self._record_matches_config(marker):
+                if (
+                    marker.get("state") != "active" or marker.get("lease_id") != finding.get("lease_id")
+                    or not self._record_matches_config(marker)
+                    or (owner is not None and marker.get("owner_marker") != owner.get("owner_marker"))
+                ):
                     return None
             audit_event = {
                 "event": "recovery",
@@ -2028,7 +2103,7 @@ class HardwareCoordinator:
                 "resources": resources,
                 "lease_id": finding.get("lease_id"),
                 "evidence": finding.get("evidence"),
-                "workspace": self.config.workspace_root,
+                "workspace": (owner or {}).get("owner_workspace", self.config.workspace_root),
                 "config_path": self.config.config_path,
                 "recorded_config_sha256": self.config_sha256,
                 "current_config_sha256": self.config_sha256,
@@ -2048,9 +2123,12 @@ class HardwareCoordinator:
                     "released_reason": DEAD_OWNER_NO_CONTACT_REASON,
                 }
             )
-            for resource in resources:
+            for resource in tracked:
                 self._write_record(resource, released)
-            self._write_record(self.project_key, released)
+            if owner is None:
+                self._write_record(self.project_key, released)
+            else:
+                self._replace_bench_owner(str(owner["owner_marker"]), released)
             return released
         except (CoordinationError, ConfigError, OSError, ValueError):
             return None
@@ -2060,6 +2138,163 @@ class HardwareCoordinator:
 
     def _project_probe_lock(self) -> _LifetimeLock:
         return _LifetimeLock(self.lock_directory / f"{resource_digest(self.project_key)}.lock")
+
+    @contextmanager
+    def _project_update(self, requested: list[str] | None = None) -> Iterator[None]:
+        if not self.concurrent_bench or self._updating_project:
+            yield
+            return
+        lock = self._acquire_lock(self.project_key, requested or [self.project_key], wait_s=5.0)
+        self._updating_project = True
+        try:
+            yield
+        finally:
+            self._updating_project = False
+            lock.release()
+
+    def _owner_key(self, marker: str) -> str:
+        return f"{self.project_key}:owner:{marker}"
+
+    def _owner_is_live(self, marker: str) -> bool:
+        probe = _LifetimeLock(self.lock_directory / f"{resource_digest(self._owner_key(marker))}.lock")
+        try:
+            probe.acquire()
+        except OSError:
+            return True
+        probe.release()
+        return False
+
+    def _bench_owners(self, project: JsonObject | None = None) -> dict[str, JsonObject]:
+        if project is None:
+            project = self._read_record(self.project_key)
+        owners = (project or {}).get("owners", {})
+        if not isinstance(owners, dict) or any(
+            not isinstance(record, dict)
+            or record.get("owner_marker") != marker
+            or not self._record_matches_project(record)
+            or not isinstance(record.get("state"), str)
+            or not isinstance(record.get("resources"), list)
+            or any(not isinstance(resource, str) for resource in record["resources"])
+            for marker, record in owners.items()
+        ):
+            raise CoordinationError({
+                "ok": False, "error_type": "coordination_state_invalid",
+                "summary": "Bench owner records are invalid and require operator recovery.",
+                "resource": self.project_key, **remediation_fields("coordination_state_invalid"),
+            })
+        return dict(owners)
+
+    def _replace_bench_owner(self, marker: str, record: JsonObject) -> None:
+        """Update one owner and retain a single bench incident for status and recovery."""
+        project = self._read_record(self.project_key) or self._base_record("released", [])
+        owners = self._bench_owners(project)
+        if record.get("state") == "released":
+            owners.pop(marker, None)
+        else:
+            owners[marker] = record
+        if project.get("owner_marker") == marker or project.get("state") == "released":
+            if record.get("state") == "released":
+                project = record
+            elif record.get("state") not in STANDING_INCIDENT_STATES or not record_audit_broken(record):
+                project = self._base_record("released", [])
+            if project.get("state") == "released":
+                project = next(
+                    (owner for owner in owners.values() if owner.get("state") in STANDING_INCIDENT_STATES and record_audit_broken(owner)),
+                    project,
+                )
+            elif record_audit_broken(record):
+                project = record
+        self._write_record(self.project_key, {**project, "owners": owners})
+
+    def _settle_bench_owners(self) -> JsonObject | None:
+        released = None
+        for marker, owner in self._bench_owners().items():
+            state = owner.get("state")
+            if state not in {"active", "quarantined", "cleanup_required"} or self._owner_is_live(marker):
+                continue
+            if state == "active":
+                finding = self._dead_owner_made_no_contact(owner)
+                if finding is not None and self._release_dead_owner(finding, owner=owner) is not None:
+                    released = finding
+                    continue
+                self._quarantine_exited_bench_owner(marker, owner)
+            # An acquisition may have adopted the old incident one device
+            # at a time. Forget it once none of its resource markers remain.
+            elif not record_audit_broken(owner) and all(
+                not self._marker_belongs_to(marker, self._read_record(resource))
+                for resource in owner["resources"]
+            ):
+                self._replace_bench_owner(marker, self._base_record("released", []))
+        return released
+
+    @staticmethod
+    def _marker_belongs_to(owner_marker: str, marker: JsonObject | None) -> bool:
+        return marker is not None and marker.get("state") not in {None, "released"} and marker.get("owner_marker") == owner_marker
+
+    def _quarantine_exited_bench_owner(self, owner_marker: str, owner: JsonObject) -> None:
+        resources = sorted(set(owner["resources"]))
+        if owner.get("shared_discovery") and DEBUGGER_DISCOVERY_RESOURCE in resources:
+            resources.remove(DEBUGGER_DISCOVERY_RESOURCE)
+        locks: list[_LifetimeLock] = []
+        try:
+            for resource in resources:
+                try:
+                    locks.append(self._acquire_lock(resource, resources))
+                except CoordinationError:
+                    # An unrelated lock can delay settlement of this record;
+                    # the next acquisition still has to check its own devices.
+                    return
+            unresolved = {
+                resource: marker for resource in resources
+                if (marker := self._read_record(resource)) is None or self._marker_belongs_to(owner_marker, marker)
+            }
+            if not unresolved:
+                self._replace_bench_owner(owner_marker, self._base_record("released", []))
+                return
+            incident = {
+                **owner, "state": "quarantined", "resources": list(unresolved),
+                "reason": "owner_process_exited_without_release", "quarantined_at": utc_now_iso(),
+                "quarantine_id": owner.get("quarantine_id") or secrets.token_hex(16),
+            }
+            for resource, marker in unresolved.items():
+                self._write_record(resource, {**(marker or {}), **incident})
+            self._replace_bench_owner(owner_marker, incident)
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+
+    def _standing_record(self, project: JsonObject | None = None) -> JsonObject | None:
+        if project is None:
+            project = self._read_record(self.project_key)
+        if project and project.get("state") in STANDING_INCIDENT_STATES and record_audit_broken(project):
+            return project
+        return next(
+            (owner for owner in self._bench_owners(project).values() if owner.get("state") in STANDING_INCIDENT_STATES and record_audit_broken(owner)),
+            None,
+        ) if project else None
+
+    def _incident_record(self, quarantine_id: str) -> JsonObject | None:
+        project = self._read_record(self.project_key)
+        if not self.concurrent_bench:
+            return project
+        standing = self._standing_record(project)
+        if standing is not None:
+            return standing
+        return next(
+            (owner for owner in self._bench_owners(project).values() if owner.get("quarantine_id") == quarantine_id),
+            project,
+        )
+
+    def _standing_refusal(self, record: JsonObject, resources: list[str]) -> JsonObject:
+        return {
+            **self._quarantined_result(resources, "This bench has an unresolved incident.", _record_cleanup_reasons(record)),
+            "quarantine_id": record.get("quarantine_id"),
+        }
+
+    def standing_incident_refusal(self) -> JsonObject | None:
+        """Read the bench gate without probing or acquiring any device."""
+        record = self._standing_record()
+        return self._standing_refusal(record, list(record.get("resources", []))) if record else None
 
     def device_holds(self) -> list[JsonObject]:
         """Every configured device that is held right now, this owner's included.
@@ -2149,17 +2384,25 @@ class HardwareCoordinator:
             if self.project_lock is not None or self.leases:
                 return {"ok": False, "tool": "hardware_recover", "error_type": "resource_busy", "summary": "Live owner still holds project resources.", **remediation_fields("resource_busy")}
             try:
-                project_lock = self._acquire_lock(self.project_key, [self.project_key])
+                project_lock = (
+                    self._acquire_lock(self.project_key, [self.project_key], wait_s=5.0)
+                    if self.concurrent_bench else self._acquire_lock(self.project_key, [self.project_key])
+                )
             except CoordinationError as error:
                 return error.result
             locks: list[_LifetimeLock] = []
             try:
-                record = self._read_record(self.project_key) or {}
+                record = self._incident_record(quarantine_id) or {}
                 state = record.get("state")
                 if state not in {"cleanup_required", "quarantined", "recovery_pending"}:
                     return {"ok": False, "tool": "hardware_recover", "error_type": "resource_not_quarantined", "summary": "Project has no quarantined incident to recover.", **remediation_fields("resource_not_quarantined")}
                 if record.get("quarantine_id") != quarantine_id or not self._record_matches_project(record):
                     return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine incident changed; inspect lease-status and confirm the current incident.", **remediation_fields("quarantine_changed")}
+                owner_marker = record.get("owner_marker")
+                if not self.concurrent_bench or not isinstance(owner_marker, str) or owner_marker not in self._bench_owners():
+                    owner_marker = None
+                if owner_marker is not None and self._owner_is_live(owner_marker):
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "resource_busy", "summary": "Live owner still holds incident resources.", **remediation_fields("resource_busy")}
                 if not self._record_config_acceptable(record, accept_config_change):
                     return {
                         "ok": False,
@@ -2237,7 +2480,10 @@ class HardwareCoordinator:
                         self._write_record(self.project_key, pending)
                     for resource in resources:
                         self._write_record(resource, released)
-                    self._write_record(self.project_key, released)
+                    if owner_marker is not None:
+                        self._replace_bench_owner(owner_marker, released)
+                    else:
+                        self._write_record(self.project_key, released)
                 except BaseException as error:
                     if isinstance(error, (KeyboardInterrupt, SystemExit)):
                         raise
@@ -2346,6 +2592,17 @@ class HardwareCoordinator:
                             return {"tool": "hardware_recover", **error.result}
                         retire.append((resource, "unreadable"))
                         continue
+                    if resource == self.project_key and record and "owners" in record:
+                        try:
+                            owners = self._bench_owners(record)
+                        except CoordinationError:
+                            retire.append((resource, "unreadable"))
+                            continue
+                        if any(self._owner_is_live(marker) for marker in owners):
+                            return {"ok": False, "tool": "hardware_recover", "error_type": "resource_busy", "summary": "Live owner still holds project resources.", **remediation_fields("resource_busy")}
+                        if owners and record.get("state") == "released":
+                            retire.append((resource, "owner_records"))
+                            continue
                     if record is None or record.get("state") in {None, "released"}:
                         continue
                     if record.get("project_resource") != self.project_key:
@@ -2408,7 +2665,8 @@ class HardwareCoordinator:
                     for entry in entries:
                         resource = str(entry["resource"])
                         atomic_write_bytes(retired_directory / Path(str(entry["retired_as"])).name, contents[resource])
-                        self._write_record(resource, released)
+                        record = {**released, "owners": {}} if self.concurrent_bench and resource == self.project_key else released
+                        self._write_record(resource, record)
                 except BaseException as error:
                     if isinstance(error, (KeyboardInterrupt, SystemExit)):
                         raise
@@ -2438,7 +2696,7 @@ class HardwareCoordinator:
                 project_lock.release()
 
     def close(self) -> None:
-        with self._guard:
+        with self._guard, (self._project_update() if self.project_lock is not None or self.leases else nullcontext()):
             if self._state == "closed":
                 return
             self._state = "closing"
@@ -2487,33 +2745,49 @@ class HardwareCoordinator:
             self.bench.release_all()
             self._state = "closed"
 
-    def _acquire_lock(self, resource: str, requested: list[str]) -> _LifetimeLock:
-        lock = _LifetimeLock(self.lock_directory / f"{resource_digest(resource)}.lock")
-        try:
-            lock.acquire()
-        except (BlockingIOError, OSError) as error:
-            raise CoordinationError(
-                {
-                    "ok": False,
-                    "error_type": "resource_busy",
-                    "summary": "Hardware resource is owned by another Agentic HIL process.",
-                    "resources": requested,
-                    "retry_safe": True,
-                    "backend_error": str(error),
-                    **remediation_fields("resource_busy"),
-                }
-            ) from error
-        return lock
+    def _acquire_lock(self, resource: str, requested: list[str], *, shared: bool = False, wait_s: float = 0.0) -> _LifetimeLock:
+        lock = _LifetimeLock(self.lock_directory / f"{resource_digest(resource)}.lock", shared=shared)
+        deadline = time.monotonic() + wait_s if wait_s else None
+        while True:
+            try:
+                lock.acquire()
+                return lock
+            except OSError as error:
+                contended = isinstance(error, BlockingIOError) or (
+                    os.name == "nt" and error.errno in {errno.EACCES, errno.EDEADLK}
+                )
+                if contended and deadline is not None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    continue
+                raise CoordinationError(
+                    {
+                        "ok": False,
+                        "error_type": "resource_busy",
+                        "summary": "Hardware resource is owned by another Agentic HIL process.",
+                        "resources": requested,
+                        "contended_resource": resource,
+                        "retry_safe": True,
+                        "backend_error": str(error),
+                        **remediation_fields("resource_busy"),
+                    }
+                ) from error
+
+    def _lock_resource(self, resource: str, requested: list[str], shared_discovery: bool) -> _LifetimeLock:
+        if shared_discovery and resource == DEBUGGER_DISCOVERY_RESOURCE:
+            return self._acquire_lock(resource, requested, shared=True)
+        return self._acquire_lock(resource, requested)
 
     def _persist_lease(self, lease: HardwareLease, state: str | None = None, incident_override: list[str] | None = None) -> None:
         record_state = state or lease.state
-        resources = list(lease.resources)
+        resources = lease.record_resources
         incident = set(incident_override) if incident_override is not None else self.incident_resources
         if record_state in {"cleanup_required", "quarantined"} and incident:
             # Every incident marker carries the full incident resource union so
             # project record and resource markers stay recovery-consistent.
             resources = sorted(set(resources) | incident)
         record = self._base_record(record_state, resources)
+        if self.concurrent_bench:
+            record["owner_workspace"] = self.config.work_dir
         record.update(
             {
                 "lease_id": lease.lease_id,
@@ -2525,17 +2799,25 @@ class HardwareCoordinator:
                 "quarantine_id": lease.quarantine_id,
             }
         )
-        for resource in lease.resources:
+        for resource in lease.record_resources:
             self._write_record(resource, record)
 
     def _persist_project(self, state: str, resources: list[str] | None = None, *, leases: dict[str, HardwareLease] | None = None) -> None:
+        if self.concurrent_bench and state == "active" and self.incident_stands:
+            state = "cleanup_required"
         population = self.leases if leases is None else leases
         if resources is None:
-            resources = sorted({resource for lease in population.values() for resource in lease.resources} | (self.incident_resources if state in {"cleanup_required", "quarantined"} else set()))
+            incident = state in {"cleanup_required", "quarantined"}
+            resources = sorted(
+                {resource for lease in population.values() for resource in (lease.record_resources if incident else lease.resources)}
+                | (self.incident_resources if incident else set())
+            )
         record = self._base_record(state, resources)
         record["leases"] = [lease.status() for lease in population.values()] + [lease.status() for lease_id, lease in self.incident_leases.items() if lease_id not in population]
         if state in {"cleanup_required", "quarantined"}:
             record["quarantine_id"] = self.quarantine_id
+            if self.concurrent_bench and self.audit_incident:
+                record["audit_ok"] = False
             if self.adopted_reason and not any(lease.status().get("cleanup_reasons") for lease in population.values()):
                 # An incident with no lease left to name it. Without this the
                 # record went out saying a bench was held and refusing to say
@@ -2543,7 +2825,13 @@ class HardwareCoordinator:
                 # therefore refuses: the operator became the only way out of an
                 # incident a reset settles.
                 record["reason"] = self.adopted_reason
-        self._write_record(self.project_key, record)
+        if self.concurrent_bench:
+            if state != "released":
+                record["owner_workspace"] = self.config.work_dir
+                record["shared_discovery"] = any(lease.shared_discovery for lease in population.values())
+            self._replace_bench_owner(self.owner_marker, record)
+        else:
+            self._write_record(self.project_key, record)
 
     def _base_record(self, state: str, resources: list[str]) -> JsonObject:
         return {
@@ -2583,6 +2871,10 @@ class HardwareCoordinator:
     def _write_record(self, resource: str, record: JsonObject) -> None:
         # Masked before it reaches the disk, except the fields a record is matched
         # on: a successor finds its own project by them, so they stay as written.
+        if resource == self.project_key and self.concurrent_bench and "owners" not in record:
+            owners = self._bench_owners()
+            if owners:
+                record = {**record, "owners": owners}
         masked = redact_values(record, supply_secrets(self.config), preserve_keys=RECORD_MATCH_KEYS)
         atomic_write_text(self._record_path(resource), json.dumps(masked, indent=2) + "\n")
 
@@ -2668,8 +2960,8 @@ class HardwareCoordinator:
     def _quarantine_registered_lease(self, lease: HardwareLease, reason: str, error: object | None = None, *, audit_broken: bool = False) -> None:
         if self.quarantine_id is None:
             self.quarantine_id = secrets.token_hex(16)
-        grew = not self.incident_resources >= set(lease.resources)
-        self.incident_resources.update(lease.resources)
+        grew = not self.incident_resources.issuperset(lease.record_resources)
+        self.incident_resources.update(lease.record_resources)
         lease.state = "cleanup_required"
         lease.quarantine_id = self.quarantine_id
         lease.audit_ok = lease.audit_ok and not audit_broken
@@ -2942,6 +3234,10 @@ def _bound_debugger_device(config: AgenticHILConfig) -> DebuggerDevice:
 
 def debugger_resource(config: AgenticHILConfig) -> str:
     return _bound_debugger_device(config).lock_key
+
+
+def _probe_effect(resources: Sequence[str]) -> bool:
+    return DEBUGGER_DISCOVERY_RESOURCE in resources and any(is_physical_resource(resource) for resource in resources)
 
 
 def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, ...]:
