@@ -150,6 +150,10 @@ jobs:
         timeout-minutes: 40
         env:
           AGENTIC_HIL_TEST_LEDGER: ${{ runner.temp }}/suite-ledger
+          # These checks scan repository text. Run them once per OS on Python 3.13.
+          PYTEST_ADDOPTS: >-
+            ${{ matrix.python-version != '3.13' &&
+            '--ignore=tests/test_codeql_encoding_declaration.py --ignore=tests/test_prose_convention.py' || '' }}
           RUSTUP_TOOLCHAIN: "1.97.0"
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
