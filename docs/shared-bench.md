@@ -79,6 +79,14 @@ devices are claimed for it, so younger jobs stop passing it on them. The queue
 is open to read: `GET /v1/queue`, or `agentic-hil remote queue`, shows every
 waiting job, whose it is, and what it waits for.
 
+Jobs on disjoint devices can run concurrently. One job can keep a UART
+session open while another uses a different UART, flashes firmware or resets
+its own target. Jobs using distinct probes can also flash or reset at the same
+time. A job that needs a device held by another job waits in the queue.
+Debugger discovery is exclusive within the bench's coordination state.
+Enumeration and operations on named probes cannot overlap, and a lock
+refusal identifies the device or discovery lock that is busy.
+
 `GET /v1/leases` shows holds for active jobs from dispatch until the scheduler
 records their end, as well as recorded device holds from outside the queue.
 To check whether a device is in use, read `/v1/queue` first, then `/v1/leases`.

@@ -29,7 +29,6 @@ from agentic_hil.config import (
     validated_state_root_paths,
 )
 from agentic_hil.coordination import HardwareCoordinator, project_resource
-from agentic_hil.knowledge import remediation_fields
 from agentic_hil.reactorrun import run_plan
 from agentic_hil.report import job_report_context, overall_success, with_job_fields, write_report
 from agentic_hil.types import AgenticHILConfig, BenchOwnership, JsonObject
@@ -111,14 +110,11 @@ def run_job(
             # effect to recover by resetting hardware at reactor teardown.
             # Read it before entering the reactor; acquire still rechecks it
             # under the normal coordination locks on every hardware call.
-            status = HardwareCoordinator(job, "reactor").status(settle_dead_owner=False)
-            if status["incident_stands"]:
+            refusal = HardwareCoordinator(job, "reactor").standing_incident_refusal()
+            if refusal is not None:
                 return write_report(job, {
-                    "ok": False, "tool": "test_reactor_run", "error_type": "resource_quarantined",
+                    **refusal, "tool": "test_reactor_run",
                     "summary": "This bench has an unresolved incident; recover it before declaring a run.",
-                    "quarantine_id": status["quarantine_id"], "cleanup_reasons": status["cleanup_reasons"],
-                    "cleanup_required": True, "quarantined": True, "retry_safe": False,
-                    **remediation_fields("resource_quarantined"),
                 })
             return with_job_fields(run_plan(job, plan_name, run_handle=run_handle, return_failed_report=True))
         except ConfigError as error:

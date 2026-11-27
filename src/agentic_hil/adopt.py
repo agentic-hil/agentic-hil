@@ -1369,7 +1369,7 @@ def discover_under_hardware_lease(
     held: list[HardwareLease] = []
     requested = [DEBUGGER_DISCOVERY_RESOURCE, *dict.fromkeys(resources)]
     try:
-        held.append(coordinator.acquire(*requested))
+        held.append(coordinator.acquire(*requested, exclusive_discovery=True))
     except CoordinationError as error:
         return {}, _coordination_refusal(error, requested, tool)
 
